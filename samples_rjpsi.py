@@ -26,8 +26,9 @@ NTUPLE_DIR = "/Users/manzoni/Documents/rjpsi_run3/ntuples/15jun26"  # EDIT
 # --- global MC normalisations -------------------------------------------------
 # (2) Tune the absolute Bc and Hb yields here. lumi * sigma / N_gen, times any
 #     k-factor / data-driven scale you want. These set the Bc:Hb *ratio*.
-BC_SCALE = 1.0
-HB_SCALE = 1.0        # applied to both hb1 and hb2 (each keeps its own below if needed)
+BC_SCALE = 0.015
+HB_SCALE = 0.04    # applied to both hb1 and hb2 (each keeps its own below if needed)
+MISID_SCALE = 0.05       # applied to both hb1 and hb2 (each keeps its own below if needed)
 
 # (4) Fix the TOTAL MC (Bc+Hb) to the data yield, preserving the Bc:Hb ratio
 #     above. Equivalent to the --scale-to-data flag.
@@ -127,10 +128,8 @@ KEEP_BC = "(gen_bc_decay >= 1) | (gen_bc_decay == -1)"
 EXCLUDE_BC = "(gen_bc_decay == 0) | (gen_bc_decay != gen_bc_decay)"
 
 JPSI_IN  = "(np.abs(jpsi_mass - 3.0969) < 0.1)"
+# JPSI_IN  = "1"
 JPSI_OUT = "(np.abs(jpsi_mass - 3.0969) > 0.15)"
-
-ISO_PASS = "(mu_reliso_04 < 0.2)"
-ISO_FAIL = "(mu_reliso_04 > 0.4)"
 
 # common selection
 COMMON_SELECTION = " & ".join([
@@ -138,19 +137,56 @@ COMMON_SELECTION = " & ".join([
 #     "(np.abs(jpsi_mass - 3.0969) > 0.15)",
     "(jpsi_good_vtx > 0.5)",
     "(jpsi_reliso_04 < 0.4)",
+    "(mu_reliso_04 < 0.3)",
     "(mu1_pt > 4)",
     "(mu2_pt > 3)",
     "(jpsi_lxy_sig > 3)",
 #     "(mu3_id_tight > 0.5)",
     "(mu3_id_soft_mva > 0.5)",
-#     "(mu_ip3d_jpsi_sv_sig > -3)",
+    "(mu_ip3d_jpsi_sv_sig > -3)",
     "(mass < 6.275)",
 #     "(mass > 6.275)",
-#     "(jpsi_lxy<0.3)",
-#     "(p4_par_jpsi>0)",
-#     "(lxyz_sig<18)",
-#     "(mu_ip3d_jpsi_pv_sig>0)"
+    "(jpsi_lxy<0.3)",
+    "(p4_par_jpsi>0)",
+    "(lxyz_sig<18)",
+    "(mu_ip3d_jpsi_pv_sig>0)"
 ])
+
+# =============================================================================
+# Data-driven misID (fake bachelor muon) background  ---------------------------
+#
+# Zero-th order fake-factor estimate:
+#   misID(signal region) = FR(pt) x [ data(fail-iso) - genuine MC(fail-iso) ]
+# i.e. take data in the bachelor-muon FAIL-isolation region, subtract the
+# genuine processes (Bc + Hb) predicted there by MC, and transfer the remainder
+# into the PASS-isolation signal region with a pt-binned fake rate FR(pt).
+#
+# Implementation maps onto the engine's `fakerate` + `group` hooks:
+#   * one +scale DATA read  in the fail region, FR-weighted  (is_data=False so it
+#     STACKS as a background rather than being drawn as points);
+#   * negative-scale MC reads (Bc, Hb) in the fail region, FR-weighted;
+#   * all three share group="misid", so the plotter sums them bin-by-bin into a
+#     single stacked entry = FR x (data_fail - MC_fail).
+# All carry is_fakerate=True (set automatically because `fakerate` is given), so
+# they are excluded from --scale-to-data.
+#
+# FAIL region = COMMON_SELECTION with the bachelor-muon isolation cut INVERTED.
+# Only the bachelor iso (mu_reliso_04) is flipped; everything else (incl. the
+# J/psi iso and JPSI_IN window) is held fixed, so fail and signal differ ONLY in
+# the variable the fake rate is measured against.
+_MU_ISO_PASS = "(mu_reliso_04 < 0.3)"
+_MU_ISO_FAIL = "(mu_reliso_04 > 0.3)"
+assert _MU_ISO_PASS in COMMON_SELECTION, \
+    "bachelor-iso term changed in COMMON_SELECTION; update _MU_ISO_PASS"
+COMMON_SELECTION_FAIL = COMMON_SELECTION.replace(_MU_ISO_PASS, _MU_ISO_FAIL)
+
+# pt-binned fake-rate table.  (pt_branch, edges, values); edges has len(values)+1
+# entries, np.inf closes the top bin.  Bachelor muon = mu3.
+# >>> PLACEHOLDER: flat FR = 0.4 in every pt bin.  Replace VALUES once measured.
+FR_PT_BRANCH = 'mu3_pt'
+FR_PT_EDGES  = [3, 4, 5, 6, 8, 10, 13, 17, np.inf]
+FR_PT_VALUES = [1.8902, 1.7225, 1.3891, 1.1067, 0.9116, 0.8141, 0.7650, 0.8973]
+FR_TABLE = (FR_PT_BRANCH, FR_PT_EDGES, FR_PT_VALUES)
 
 # =============================================================================
 samples = [
@@ -158,9 +194,10 @@ samples = [
     Sample(
         name="bc",
         files=[f"{NTUPLE_DIR}/bc.root"],
+        datacard="Bc",                   # all gen_bc_decay components -> one Bc template
         scale=BC_SCALE,                  # lumi * sigma(Bc) / N_gen  (see top)
         weight_branches=[],              # e.g. ["puWeight", "ctau_weight_central"]
-        selection=f"({COMMON_SELECTION}) & ({KEEP_BC}) & ({JPSI_IN}) & ({ISO_PASS})" ,
+        selection=f"({COMMON_SELECTION}) & ({KEEP_BC}) & ({JPSI_IN})" ,
         split_by="gen_bc_decay",
         split_map=BC_SPLIT,
         split_default=BC_DEFAULT,
@@ -173,8 +210,9 @@ samples = [
     Sample(
         name="hb", files=[f"{NTUPLE_DIR}/hb.root"],
         label=r"$H_b\!\to\! J/\psi + X$", color=P[5], group="hb",
+        datacard="Hb",
         scale=HB_SCALE, 
-        selection=f"({COMMON_SELECTION}) & ({EXCLUDE_BC}) & ({JPSI_IN}) & ({ISO_PASS})" ,
+        selection=f"({COMMON_SELECTION}) & ({EXCLUDE_BC}) & ({JPSI_IN})" ,
         weight_branches=[],
     ),
 
@@ -182,36 +220,49 @@ samples = [
     Sample(
         name="data", 
         files=[f"{NTUPLE_DIR}/data.root"], 
-        selection=f"({COMMON_SELECTION}) & ({JPSI_IN}) & ({ISO_PASS})" ,
-        is_data=True
+        selection=f"({COMMON_SELECTION}) & ({JPSI_IN})" ,
+        is_data=True, datacard="data_obs"
     ),
 
-    # --- misID -----------------------------------------------------------------
     Sample(
-        name="misID",
-        files=[f"{NTUPLE_DIR}/data.root"],
-        label=r"misID",
-        color=P[6],
-        group="misID",
-        scale=20.0,            # see note below — almost certainly not 1.0
-        selection=f"({COMMON_SELECTION}) & ({JPSI_IN}) & ({ISO_FAIL})",
-        # no is_data
+        name="combinatorial", 
+        files=[f"{NTUPLE_DIR}/data.root"], 
+        selection=f"({COMMON_SELECTION}) & ({JPSI_OUT})" ,
+        is_data=True,                    # datacard="" (default): excluded from datacards
     ),
 
-
-
-
-
-
-#     Sample(
-#         name="combinatorial",
-#         files=[f"{NTUPLE_DIR}/data.root"],
-#         label=r"combinatorial",
-#         color=P[6],
-#         group="combinatorial",
-#         scale=20.0,            # see note below — almost certainly not 1.0
-#         selection=f"({COMMON_SELECTION}) & ({JPSI_OUT})",
-#         # no is_data
-#     ),
+    # --- data-driven misID (fake bachelor muon) ------------------------------
+    # FR x (data_fail - Bc_fail - Hb_fail); the three reads merge via group="misid".
+    # is_data=False on the data read so it STACKS (FR-weighted) instead of being
+    # drawn as points. MC reads carry a NEGATIVE scale to subtract.
+    Sample(
+        name="misid_data",
+        files=[f"{NTUPLE_DIR}/data.root"],
+        label=r"misID (data-driven)", color=P[9], group="misid",
+        datacard="misID",
+        scale=MISID_SCALE,
+        selection=f"({COMMON_SELECTION_FAIL}) & ({JPSI_IN})",
+        fakerate=FR_TABLE,
+        # NOTE: is_data stays False on purpose (this is a stacked background,
+        # built from data but not the measurement).
+    ),
+    Sample(
+        name="misid_bc_sub",
+        files=[f"{NTUPLE_DIR}/bc.root"],
+        group="misid", datacard="misID",
+        scale=-BC_SCALE,                 # subtract genuine Bc predicted in fail
+        weight_branches=[],              # mirror the genuine `bc` sample's weights
+        selection=f"({COMMON_SELECTION_FAIL}) & ({KEEP_BC}) & ({JPSI_IN})",
+        fakerate=FR_TABLE,
+    ),
+    Sample(
+        name="misid_hb_sub",
+        files=[f"{NTUPLE_DIR}/hb.root"],
+        group="misid", datacard="misID",
+        scale=-HB_SCALE,                 # subtract genuine Hb predicted in fail
+        weight_branches=[],              # mirror the genuine `hb` sample's weights
+        selection=f"({COMMON_SELECTION_FAIL}) & ({EXCLUDE_BC}) & ({JPSI_IN})",
+        fakerate=FR_TABLE,
+    ),
 
 ]

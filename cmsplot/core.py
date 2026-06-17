@@ -65,6 +65,15 @@ class Sample:
     split_default: Optional[tuple] = None
     group: str = ""
     tree: str = "tree"
+    datacard: str = ""    # Combine datacard process tag: "Bc"/"Hb"/"misID" feed
+                          # templates (reads sharing a tag are summed), "data_obs"
+                          # is the observation, "" excludes (e.g. combinatorial).
+    fakerate: Optional[tuple] = None
+    # (pt_branch, edges, values): per-event fake rate FR(pt) looked up from a
+    # binned table and folded into the weight. ``edges`` has len(values)+1 entries
+    # (use np.inf for the open top bin). Used by the data-driven misID estimate:
+    # a +scale data read and -scale MC reads share a `group` so the plotter sums
+    # them into FR x (data_fail - MC_fail). FR procs are exempt from scale-to-data.
 
     def __post_init__(self):
         if not self.label:
@@ -82,6 +91,8 @@ class Process:
     arrays: dict          # branch -> 1D numpy array
     weight: np.ndarray    # per-event weight, same length as arrays
     group: str = ""       # stack-merge tag across samples (e.g. "hb")
+    is_fakerate: bool = False  # built from a fake-rate read (exempt scale-to-data)
+    datacard: str = ""    # Combine datacard process tag (inherited from Sample)
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +135,8 @@ def _needed_columns(sample, needed_plot):
         | set(sample.weight_branches)
     if sample.split_by:
         want.add(sample.split_by)
+    if sample.fakerate:
+        want.add(sample.fakerate[0])   # pt branch for the FR(pt) lookup
     return want
 
 
@@ -197,6 +210,23 @@ def _selection_mask(arrays, expr):
             % (missing, ", ".join(sorted(arrays)[:12]))) from e
 
 
+def _fakerate_lookup(pt, edges, values):
+    """Per-event FR(pt) from a binned table. ``edges`` has len(values)+1 entries
+    (np.inf allowed for the open top bin). Non-finite pt -> FR 0 (event dropped)."""
+    if pt is None:
+        raise KeyError("fakerate pt branch not present in the read arrays")
+    pt = np.asarray(pt, "float64")
+    edges = np.asarray(edges, "float64")
+    values = np.asarray(values, "float64")
+    if edges.size != values.size + 1:
+        raise ValueError("fakerate edges must have len(values)+1 entries "
+                         "(%d edges vs %d values)" % (edges.size, values.size))
+    idx = np.clip(np.digitize(pt, edges) - 1, 0, values.size - 1)
+    fr = values[idx]
+    fr[~np.isfinite(pt)] = 0.0
+    return fr
+
+
 def _make_processes(sample: Sample, arrays: dict, fallback_color=None):
     """Turn (already selection-filtered) arrays into Process objects (weight/split)."""
     if not arrays:
@@ -212,10 +242,17 @@ def _make_processes(sample: Sample, arrays: dict, fallback_color=None):
             if wb in arrays:
                 weight = weight * arrays[wb]
 
+    # fold a pt-binned fake rate into the weight (applies before any split, so
+    # split slices inherit it). data-driven misID uses this on data and MC reads.
+    if sample.fakerate is not None:
+        ptb, fr_edges, fr_vals = sample.fakerate
+        weight = weight * _fakerate_lookup(arrays.get(ptb), fr_edges, fr_vals)
+
     if not sample.split_by or sample.split_by not in arrays:
         return [Process(sample.name, sample.label, sample.color or fallback_color,
                         sample.is_data, sample.is_signal, arrays, weight,
-                        group=sample.group)]
+                        group=sample.group, is_fakerate=bool(sample.fakerate),
+                        datacard=sample.datacard)]
 
     # integer codes, with non-finite (NaN) routed to the default component
     raw = arrays[sample.split_by].astype("float64")
@@ -242,7 +279,8 @@ def _make_processes(sample: Sample, arrays: dict, fallback_color=None):
             "%s::%s" % (sample.name, lab), lab, col,
             sample.is_data, is_sig,
             {k: v[m] for k, v in arrays.items()}, weight[m],
-            group=sample.group))
+            group=sample.group, is_fakerate=bool(sample.fakerate),
+            datacard=sample.datacard))
     return procs
 
 
@@ -485,7 +523,8 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
         nbins=40, jobs=4, lumi=None, com=13.6, extra="Preliminary",
         normalize=False, overflow=False, scale_to_data=False,
         binning_overrides=None, max_events=-1, step_size="150 MB",
-        to_float32=True, verbose=True):
+        to_float32=True, verbose=True,
+        datacard_branches=None, datacard_signal="Bc"):
     """Load samples and produce one stacked plot per branch."""
     from datetime import datetime
 
@@ -506,21 +545,44 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
                  "%d columns" % len(needed_plot) if needed_plot else "all columns"))
     procs = hg.load()
 
+    # datacards must use the NOMINAL normalisation (so the fit can determine the
+    # process yields), so build them BEFORE scale-to-data mutates the weights.
+    if datacard_branches:
+        from . import datacard as _dc
+        dc_todo = [b for b in datacard_branches if b not in set(exclude)]
+        if verbose:
+            print("[cmsplot] writing %d datacard(s) -> %s/%s/datacards"
+                  % (len(dc_todo), outdir, label))
+        try:
+            _dc.write_datacards(procs, hg, dc_todo, outdir, label, nbins=nbins,
+                                signal=datacard_signal, overflow=overflow,
+                                verbose=verbose)
+        except Exception as e:
+            print("  ! datacard generation failed: %s" % e)
+
     # fix the total MC normalisation to the data yield (keeps the Bc:Hb ratio,
     # which is set by the per-sample `scale`s, untouched)
     if scale_to_data:
-        mc_tot = sum(float(np.sum(p.weight)) for p in procs if not p.is_data)
+        # genuine (simulated) MC only; data-driven fake-rate procs are a
+        # data-derived background and must NOT be rescaled -- so the genuine MC
+        # is scaled to (data - fakes), keeping the fake estimate fixed.
+        genuine = [p for p in procs if not p.is_data and not p.is_fakerate]
+        mc_tot = sum(float(np.sum(p.weight)) for p in genuine)
+        fake_tot = sum(float(np.sum(p.weight))
+                       for p in procs if not p.is_data and p.is_fakerate)
         dat_tot = sum(float(np.sum(p.weight)) for p in procs if p.is_data)
-        if mc_tot > 0 and dat_tot > 0:
-            f = dat_tot / mc_tot
-            for p in procs:
-                if not p.is_data:
-                    p.weight = p.weight * f
+        target = dat_tot - fake_tot
+        if mc_tot > 0 and target > 0:
+            f = target / mc_tot
+            for p in genuine:
+                p.weight = p.weight * f
             if verbose:
-                print("[cmsplot] scale-to-data: MC x %.4g (MC %.1f -> data %.0f)"
-                      % (f, mc_tot, dat_tot))
+                print("[cmsplot] scale-to-data: genuine MC x %.4g "
+                      "(MC %.1f -> data %.0f - fakes %.1f)"
+                      % (f, mc_tot, dat_tot, fake_tot))
         elif verbose:
-            print("[cmsplot] scale-to-data requested but MC or data yield is 0")
+            print("[cmsplot] scale-to-data requested but MC or "
+                  "(data - fakes) yield is <= 0")
 
     if verbose:
         for p in procs:

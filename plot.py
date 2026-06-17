@@ -47,6 +47,12 @@ def main():
     ap.add_argument("--float64", action="store_true",
                     help="keep float64 (default downcasts to float32 to save RAM)")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--datacard-branches", nargs="*", default=None,
+                    help="branches to also emit Combine datacards for "
+                         "(.root + .txt under <outdir>/<label>/datacards)")
+    ap.add_argument("--datacard-signal", default="Bc",
+                    help="datacard process treated as signal (process id 0); "
+                         "the rest float with free rateParams")
     args = ap.parse_args()
 
     # cmsplot must be importable: add the dir holding this script to sys.path
@@ -70,7 +76,9 @@ def main():
         normalize=args.normalize, overflow=args.overflow,
         scale_to_data=scale_to_data, binning_overrides=binning_overrides,
         max_events=args.maxevents, step_size=args.step_size,
-        to_float32=not args.float64, verbose=not args.quiet)
+        to_float32=not args.float64, verbose=not args.quiet,
+        datacard_branches=args.datacard_branches,
+        datacard_signal=args.datacard_signal)
 
 
 if __name__ == "__main__":
