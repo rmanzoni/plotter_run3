@@ -26,9 +26,13 @@ NTUPLE_DIR = "/Users/manzoni/Documents/rjpsi_run3/ntuples/15jun26"  # EDIT
 # --- global MC normalisations -------------------------------------------------
 # (2) Tune the absolute Bc and Hb yields here. lumi * sigma / N_gen, times any
 #     k-factor / data-driven scale you want. These set the Bc:Hb *ratio*.
-BC_SCALE = 0.015
-HB_SCALE = 0.04    # applied to both hb1 and hb2 (each keeps its own below if needed)
-MISID_SCALE = 0.05       # applied to both hb1 and hb2 (each keeps its own below if needed)
+BC_SCALE = 0.015 * 0.4267616659357488 * 1.03605435648848
+HB_SCALE = 0.04  * 0.8141294120498126 * 0.5831798345092318 # applied to both hb1 and hb2 (each keeps its own below if needed)
+MISID_SCALE = 1.0        # DATA fail-region count enters UNSCALED; only FR(pt) weights it.
+                         # (was 0.05: an arbitrary 20x suppression of the data term while the
+                         #  MC-subtraction terms used the genuine BC/HB scales -> the fake-factor
+                         #  bracket FR*(data_fail - MC_fail) was internally inconsistent and the
+                         #  per-bin template flipped sign.)
 
 # (4) Fix the TOTAL MC (Bc+Hb) to the data yield, preserving the Bc:Hb ratio
 #     above. Equivalent to the --scale-to-data flag.
@@ -45,8 +49,11 @@ BINNING = {
 
     "q2_jpsi"                    : (40, -10, 12),
     "q2_sv"                      : (40, -10, 12),
-    "m_miss2_jpsi"               : (40, -10, 10),
-    "m_miss2_sv"                 : (40, -10, 10),
+#     "m_miss2_jpsi"               : (40, -10, 10),
+#     "m_miss2_sv"                 : (40, -10, 10),
+    "m_miss2_jpsi"               : (20, -10, 10),
+    "m_miss2_sv"                 : (20, -10, 10),
+    "q2_coll"                    : (22,   0, 11),
 
     "nu1_q2_jpsi"                : (40,   0, 12),
     "nu2_q2_jpsi"                : (40,   0, 12),
@@ -185,7 +192,7 @@ COMMON_SELECTION_FAIL = COMMON_SELECTION.replace(_MU_ISO_PASS, _MU_ISO_FAIL)
 # >>> PLACEHOLDER: flat FR = 0.4 in every pt bin.  Replace VALUES once measured.
 FR_PT_BRANCH = 'mu3_pt'
 FR_PT_EDGES  = [3, 4, 5, 6, 8, 10, 13, 17, np.inf]
-FR_PT_VALUES = [1.8902, 1.7225, 1.3891, 1.1067, 0.9116, 0.8141, 0.7650, 0.8973]
+FR_PT_VALUES = 0.2 * np.array([1.8902, 1.7225, 1.3891, 1.1067, 0.9116, 0.8141, 0.7650, 0.8973])
 FR_TABLE = (FR_PT_BRANCH, FR_PT_EDGES, FR_PT_VALUES)
 
 # =============================================================================
@@ -224,12 +231,18 @@ samples = [
         is_data=True, datacard="data_obs"
     ),
 
-    Sample(
-        name="combinatorial", 
-        files=[f"{NTUPLE_DIR}/data.root"], 
-        selection=f"({COMMON_SELECTION}) & ({JPSI_OUT})" ,
-        is_data=True,                    # datacard="" (default): excluded from datacards
-    ),
+#     Sample(
+#         name="combinatorial",
+#         files=[f"{NTUPLE_DIR}/data.root"],
+#         label=r"combinatorial ($J/\psi$ sidebands)", color=P[8], group="comb",
+#         datacard="combinatorial",        # free rateParam template in the fit (set to ""
+#                                          # ONLY if you intend the misID template to absorb it)
+#         selection=f"({COMMON_SELECTION}) & ({JPSI_OUT})" ,
+#         is_data=False,                   # data-DERIVED BACKGROUND: must STACK, never be drawn
+#                                          # as data points. (was is_data=True, which summed the
+#                                          # J/psi-sideband counts into the black data points so
+#                                          # the plotted "Data" no longer matched datacard data_obs.)
+#     ),
 
     # --- data-driven misID (fake bachelor muon) ------------------------------
     # FR x (data_fail - Bc_fail - Hb_fail); the three reads merge via group="misid".

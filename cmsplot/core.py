@@ -365,13 +365,29 @@ class Histogrammer:
                 n, lo, hi = spec
                 return np.linspace(float(lo), float(hi), int(n) + 1)
             return np.asarray(spec, dtype="float64")
+        # Derive the bin range from the SIGNAL-region processes only. Data-driven
+        # control-region estimates (fake-rate misID from the fail-iso region, and
+        # any `data_driven` background such as the J/psi-sideband combinatorial)
+        # have different distributions; letting them drive the auto-binning makes
+        # the bins depend on whether misID is enabled -- which silently desyncs
+        # plots from datacards. Exclude them here (they are still histogrammed
+        # with the chosen edges).
+        def _drives_binning(p):
+            return not (p.is_fakerate or getattr(p, "data_driven", False))
         vals = []
         for p in self.processes:
-            if branch in p.arrays:
+            if branch in p.arrays and _drives_binning(p):
                 a = p.arrays[branch]
                 if a.size > self.max_range_events:
                     a = a[:: max(1, a.size // self.max_range_events)]
                 vals.append(a)
+        if not vals:  # fall back to all processes if nothing else has the branch
+            for p in self.processes:
+                if branch in p.arrays:
+                    a = p.arrays[branch]
+                    if a.size > self.max_range_events:
+                        a = a[:: max(1, a.size // self.max_range_events)]
+                    vals.append(a)
         if not vals:
             return np.linspace(0, 1, nbins + 1)
         return binning.guess_binning(np.concatenate(vals), branch, nbins=nbins)

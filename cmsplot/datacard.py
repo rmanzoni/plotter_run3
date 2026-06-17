@@ -86,12 +86,15 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
     tags = _mc_tags(procs, signal)
     lo, hi = rate_param_range
 
+    n_ok, n_skip, n_fail = 0, 0, 0
     for branch in branches:
+      try:
         present = [p for p in procs if branch in p.arrays]
         if not any((not p.is_data and p.datacard in tags) for p in present):
             if verbose:
                 print("  ! datacard %s: no MC templates for this branch, skip"
                       % branch)
+            n_skip += 1
             continue
         edges = hg.edges_for(branch, nbins=nbins)
 
@@ -136,6 +139,7 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
         # --- write datacard text ------------------------------------------
         _write_card(os.path.join(dcdir, "%s.txt" % branch), branch, tags, sw,
                     d_sw, signal, lo, hi, obs_is_asimov)
+        n_ok += 1
 
         if verbose:
             fl = ", ".join("%s:%d" % (t, n_floored[t]) for t in tags
@@ -144,7 +148,24 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
                   % (branch, branch, int(round(d_sw.sum())),
                      " (Asimov)" if obs_is_asimov else "",
                      ("  floored[" + fl + "]") if fl else ""))
+      except Exception as e:
+        # never let one bad branch abort the loop and leave LATER branches'
+        # datacards stale on disk (a silent plot/datacard mismatch). Remove any
+        # half-written file for this branch so a stale copy can't be mistaken
+        # for a fresh one, and carry on.
+        n_fail += 1
+        for ext in ("root", "txt"):
+            stale = os.path.join(dcdir, "%s.%s" % (branch, ext))
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+        print("  ! datacard %s FAILED (%s) -- removed any stale file, continuing"
+              % (branch, e))
 
+    if verbose:
+        print("[cmsplot] datacards: %d written, %d skipped, %d failed"
+              % (n_ok, n_skip, n_fail))
     return dcdir
 
 
