@@ -93,6 +93,8 @@ class Process:
     group: str = ""       # stack-merge tag across samples (e.g. "hb")
     is_fakerate: bool = False  # built from a fake-rate read (exempt scale-to-data)
     datacard: str = ""    # Combine datacard process tag (inherited from Sample)
+    sample_name: str = ""      # originating Sample.name (datacard-composition key)
+    split_codes: tuple = ()    # gen codes folded into this component (split samples)
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +254,7 @@ def _make_processes(sample: Sample, arrays: dict, fallback_color=None):
         return [Process(sample.name, sample.label, sample.color or fallback_color,
                         sample.is_data, sample.is_signal, arrays, weight,
                         group=sample.group, is_fakerate=bool(sample.fakerate),
-                        datacard=sample.datacard)]
+                        datacard=sample.datacard, sample_name=sample.name)]
 
     # integer codes, with non-finite (NaN) routed to the default component
     raw = arrays[sample.split_by].astype("float64")
@@ -261,7 +263,7 @@ def _make_processes(sample: Sample, arrays: dict, fallback_color=None):
     codes[finite] = np.round(raw[finite]).astype("int64")
 
     from collections import OrderedDict
-    comps = OrderedDict()  # component label -> [color, is_signal, combined mask]
+    comps = OrderedDict()  # component label -> [color, is_signal, mask, code list]
     for code in np.unique(codes):
         entry = sample.split_map.get(int(code), sample.split_default)
         if entry is None:                       # no default -> one process per code
@@ -270,17 +272,19 @@ def _make_processes(sample: Sample, arrays: dict, fallback_color=None):
         m = codes == code
         if lab in comps:
             comps[lab][2] |= m
+            comps[lab][3].append(int(code))
         else:
-            comps[lab] = [col, bool(is_sig), m]
+            comps[lab] = [col, bool(is_sig), m, [int(code)]]
 
     procs = []
-    for lab, (col, is_sig, m) in comps.items():
+    for lab, (col, is_sig, m, codelist) in comps.items():
         procs.append(Process(
             "%s::%s" % (sample.name, lab), lab, col,
             sample.is_data, is_sig,
             {k: v[m] for k, v in arrays.items()}, weight[m],
             group=sample.group, is_fakerate=bool(sample.fakerate),
-            datacard=sample.datacard))
+            datacard=sample.datacard, sample_name=sample.name,
+            split_codes=tuple(sorted(codelist))))
     return procs
 
 
@@ -488,8 +492,8 @@ class StackPlotter:
 
         ax.set_ylabel("a.u." if self.normalize else "Events")
         ax.set_xlim(edges[0], edges[-1])
-        ax.legend(ncol=2 if len(stack) <= 8 else 3, fontsize="x-small",
-                  loc="upper right")
+        ncol = 2 if len(stack) <= 8 else 3
+        leg = ax.legend(ncol=ncol, fontsize="x-small", loc="upper right")
         style.cms_label(ax, lumi=self.lumi, com=self.com,
                         data=have_data, extra=self.extra)
 
@@ -513,14 +517,50 @@ class StackPlotter:
         else:
             ax.set_xlabel(binning.axis_label(branch))
 
+        # Headroom: size the y-axis so the tallest stack/data point clears the
+        # legend instead of being hidden behind it. We measure the legend's
+        # lower edge (in axes fraction) after a draw and put the peak just below
+        # it; if the measurement is unavailable we fall back to an estimate from
+        # the number of legend rows. Both linear and log use the same target so
+        # the gap looks consistent.
         ymax = max(bottom.max(), (data_sw.max() * norm) if have_data else 0.0)
-        ax.set_ylim(0.0, 1.55 * ymax if ymax > 0 else 1.0)  # headroom for legend
+        n_handles = len(stack) + 1 + (1 if have_data else 0)   # +1 MC-stat band
+        nrows = int(np.ceil(n_handles / max(1, ncol)))
+        target = self._headroom_target(fig, ax, leg, nrows)
+
+        ax.set_ylim(0.0, (ymax / target) if ymax > 0 else 1.0)
         self._save(fig, ax, outdir, label, branch, logy=False)
-        # log version
+        # log version: keep the same fractional clearance below the legend
         ax.set_yscale("log")
-        ax.set_ylim(0.3 * norm if self.normalize else 0.3, ymax * 50 + 1)
+        bot = (0.3 * norm) if self.normalize else 0.3
+        peak = ymax if ymax > 0 else 1.0
+        top = (bot * (peak / bot) ** (1.0 / target)) if peak > bot else bot * 50
+        ax.set_ylim(bot, top)
         self._save(fig, ax, outdir, label, branch, logy=True)
         plt.close(fig)
+
+    @staticmethod
+    def _headroom_target(fig, ax, leg, nrows):
+        """Fraction of the axes height the data should be allowed to fill.
+
+        Measures the legend's lower edge in axes-fraction coordinates (so the
+        peak sits a small margin below it). The legend is anchored to the axes,
+        not the data, so this fraction does not depend on the y-limits we are
+        about to set. Falls back to a row-count estimate if the draw/extent is
+        unavailable, and is clamped so there is always some headroom and we
+        never demand an absurdly tall axis.
+        """
+        frac = None
+        try:
+            fig.canvas.draw()
+            bb = leg.get_window_extent().transformed(ax.transAxes.inverted())
+            if np.isfinite(bb.y0) and 0.0 < bb.y0 < 1.0:
+                frac = float(bb.y0)
+        except Exception:
+            frac = None
+        if frac is None:                       # estimate from legend rows
+            frac = 0.96 - 0.07 * nrows
+        return min(0.92, max(0.45, frac - 0.06))
 
     @staticmethod
     def _save(fig, ax, outdir, label, branch, logy):
@@ -540,9 +580,13 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
         normalize=False, overflow=False, scale_to_data=False,
         binning_overrides=None, max_events=-1, step_size="150 MB",
         to_float32=True, verbose=True,
-        datacard_branches=None, datacard_signal="Bc"):
+        datacard_branches=None, datacard_signal="Bc", datacard_def=None,
+        axis_titles=None):
     """Load samples and produce one stacked plot per branch."""
     from datetime import datetime
+
+    # merge any config-supplied exact branch->axis-title overrides (issue 4)
+    binning.set_user_titles(axis_titles)
 
     if label is None:
         label = datetime.now().strftime("%d%b%Y_%Hh%Mm%Ss")
@@ -572,7 +616,7 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
         try:
             _dc.write_datacards(procs, hg, dc_todo, outdir, label, nbins=nbins,
                                 signal=datacard_signal, overflow=overflow,
-                                verbose=verbose)
+                                verbose=verbose, datacard_def=datacard_def)
         except Exception as e:
             print("  ! datacard generation failed: %s" % e)
 

@@ -57,40 +57,144 @@ def _resolve_data_obs(procs):
         % [p.key for p in untagged])
 
 
-def _mc_tags(procs, signal):
-    """Ordered list of MC datacard process names, signal first."""
+def _mc_tags(procs, signal, etag=None):
+    """Ordered list of MC datacard process names, signal first.
+
+    ``etag(p)`` returns the effective datacard tag for a process (defaults to
+    ``p.datacard``), so a config-driven composition is honoured here too.
+    """
+    if etag is None:
+        etag = lambda p: p.datacard
     tags = []
     for p in procs:
-        if not p.is_data and p.datacard and p.datacard != "data_obs":
-            if p.datacard not in tags:
-                tags.append(p.datacard)
+        t = etag(p)
+        if not p.is_data and t and t != "data_obs":
+            if t not in tags:
+                tags.append(t)
     if signal not in tags:
         raise ValueError("datacard signal %r not among MC processes %s "
-                         "(check the `datacard=` tags / --datacard-signal)"
-                         % (signal, tags))
+                         "(check the `datacard=` tags / DATACARD config / "
+                         "--datacard-signal)" % (signal, tags))
     tags.remove(signal)
     return [signal] + tags                          # signal -> process id 0
 
 
+def _norm_sel(sel):
+    """Normalise a contribution selector into a dict.
+
+    Accepted shorthands (all equivalent to the dict on the right):
+      "bc"              -> {"sample": "bc"}                (whole sample)
+      ("bc", [1, 7])    -> {"sample": "bc", "codes": [1, 7]}
+      {"sample": "bc", "codes": [1]}                       (canonical)
+      {"group": "misid"}                                   (match by stack group)
+    """
+    if isinstance(sel, str):
+        return {"sample": sel}
+    if isinstance(sel, (tuple, list)):
+        d = {"sample": sel[0]}
+        if len(sel) > 1 and sel[1] is not None:
+            d["codes"] = list(sel[1])
+        return d
+    if isinstance(sel, dict):
+        return sel
+    raise TypeError("unrecognised datacard selector: %r" % (sel,))
+
+
+def _selector_matches(p, sel):
+    """Does Process ``p`` belong to this selector?
+
+    ``group`` matches the stack-merge tag. ``sample`` matches the originating
+    Sample.name; with ``codes`` it additionally requires the process' gen codes
+    to be a subset of the listed codes (so datacard granularity must be at least
+    as coarse as the plotting split -- you cannot subdivide an already-merged
+    component). Without ``codes`` every process from that sample matches.
+    """
+    if sel.get("group"):
+        return p.group == sel["group"]
+    smp = sel.get("sample")
+    if smp is None or getattr(p, "sample_name", "") != smp:
+        return False
+    codes = sel.get("codes")
+    if codes is not None:
+        sc = set(getattr(p, "split_codes", ()) or ())
+        if not sc or not sc.issubset(set(int(c) for c in codes)):
+            return False
+    return True
+
+
+def resolve_datacard_tags(procs, datacard_def, verbose=True):
+    """Map each MC Process to a datacard process name per ``datacard_def``.
+
+    ``datacard_def`` is a dict::
+
+        {"signal": "<process name>",
+         "processes": OrderedDict(name -> [selector, selector, ...])}
+
+    The first datacard process whose selector list matches a Process wins; a
+    Process matching nothing is tagged "" (excluded from the datacard). Returns
+    ``(tag_of, signal)`` where ``tag_of`` is ``{id(p): tag}`` for non-data
+    processes (data keeps its own ``datacard`` tag for the observation).
+    """
+    spec = datacard_def.get("processes", datacard_def)
+    order = list(spec.items())
+    signal = datacard_def.get("signal")
+    tag_of, unmatched = {}, []
+    for p in procs:
+        if p.is_data:
+            continue
+        chosen = ""
+        for name, selectors in order:
+            sels = selectors if isinstance(selectors, (list, tuple)) else [selectors]
+            if any(_selector_matches(p, _norm_sel(s)) for s in sels):
+                chosen = name
+                break
+        tag_of[id(p)] = chosen
+        if not chosen:
+            unmatched.append(p.label)
+    if verbose and unmatched:
+        print("  ! datacard composition: %d process(es) matched no datacard "
+              "process and are EXCLUDED: %s" % (len(unmatched), unmatched))
+    return tag_of, signal
+
+
 def write_datacards(procs, hg, branches, outdir, label, nbins=40,
                     signal="Bc", overflow=False, floor=1e-6,
-                    rate_param_range=(0.0, 10.0), verbose=True):
-    """Write a shape file + datacard per branch. Returns the datacards dir."""
+                    rate_param_range=(0.0, 10.0), verbose=True,
+                    datacard_def=None):
+    """Write a shape file + datacard per branch. Returns the datacards dir.
+
+    If ``datacard_def`` is given it re-composes the datacard processes from the
+    loaded Processes (e.g. splitting the Bc cocktail into separate templates)
+    and may override ``signal``; otherwise the per-Sample ``datacard=`` tags are
+    used unchanged.
+    """
     import uproot
     from .core import _hist                         # lazy: avoids import cycle
 
     dcdir = os.path.join(outdir, label, "datacards")
     os.makedirs(dcdir, exist_ok=True)
 
+    # effective datacard tag per process (config-driven override, or the
+    # per-sample tag). data_obs is resolved separately and never overridden.
+    if datacard_def:
+        tag_of, sig = resolve_datacard_tags(procs, datacard_def, verbose=verbose)
+        if sig:
+            signal = sig
+    else:
+        tag_of = {}
+
+    def etag(p):
+        return tag_of.get(id(p), p.datacard)
+
     obs_procs = _resolve_data_obs(procs)
-    tags = _mc_tags(procs, signal)
+    tags = _mc_tags(procs, signal, etag)
     lo, hi = rate_param_range
 
     n_ok, n_skip, n_fail = 0, 0, 0
     for branch in branches:
       try:
         present = [p for p in procs if branch in p.arrays]
-        if not any((not p.is_data and p.datacard in tags) for p in present):
+        if not any((not p.is_data and etag(p) in tags) for p in present):
             if verbose:
                 print("  ! datacard %s: no MC templates for this branch, skip"
                       % branch)
@@ -102,11 +206,12 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
         sw = {t: np.zeros(len(edges) - 1) for t in tags}
         sw2 = {t: np.zeros(len(edges) - 1) for t in tags}
         for p in present:
-            if p.is_data or p.datacard not in tags:
+            t = etag(p)
+            if p.is_data or t not in tags:
                 continue
             s, s2 = _hist(p.arrays[branch], p.weight, edges, overflow=overflow)
-            sw[p.datacard] += s
-            sw2[p.datacard] += s2
+            sw[t] += s
+            sw2[t] += s2
 
         # floor non-positive expected yields (Combine requires >= 0)
         n_floored = {}
@@ -171,9 +276,21 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
 
 def _write_card(path, channel, tags, sw, d_sw, signal, lo, hi, asimov):
     nbkg = len(tags) - 1
-    col = max(12, max((len(t) for t in tags), default=0) + 2)
     procid = {t: (0 if t == signal else i)
               for i, t in enumerate([signal] + [t for t in tags if t != signal])}
+
+    # Column width MUST exceed the widest cell that will ever sit in a data
+    # column, otherwise %*s right-justifies with zero leading space and adjacent
+    # cells run together -- e.g. three "m_miss2_jpsi" bin cells printing as
+    # "m_miss2_jpsim_miss2_jpsim_miss2_jpsi", which Combine then cannot parse.
+    # The bin rows carry the *channel* (branch) name, not a process tag, so the
+    # old width (max tag length) was too small for any branch >= that length.
+    rate_strs = {t: "%.4f" % sw[t].sum() for t in tags}
+    widest = max([len(channel)]
+                 + [len(t) for t in tags]
+                 + [len(str(procid[t])) for t in tags]
+                 + [len(rate_strs[t]) for t in tags])
+    col = max(12, widest + 2)                 # +2 guarantees >=2 spaces between cells
 
     def row(headercells):
         return "".join(["%-14s" % headercells[0]]
@@ -198,7 +315,7 @@ def _write_card(path, channel, tags, sw, d_sw, signal, lo, hi, asimov):
     lines.append(row(["bin"] + [channel] * len(tags)))
     lines.append(row(["process"] + list(tags)))
     lines.append(row(["process"] + [str(procid[t]) for t in tags]))
-    lines.append(row(["rate"] + ["%.4f" % sw[t].sum() for t in tags]))
+    lines.append(row(["rate"] + [rate_strs[t] for t in tags]))
     lines.append("-" * 80)
     # free-floating normalisations for the non-signal processes
     for t in tags:

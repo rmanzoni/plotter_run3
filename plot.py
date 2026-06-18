@@ -69,6 +69,8 @@ def main():
     extra = args.extra if args.extra is not None else getattr(cfg, "EXTRA", "Preliminary")
     binning_overrides = getattr(cfg, "BINNING", {})
     scale_to_data = args.scale_to_data or getattr(cfg, "SCALE_TO_DATA", False)
+    datacard_def = getattr(cfg, "DATACARD", None)
+    axis_titles = getattr(cfg, "AXIS_TITLES", None)
 
     run(samples, outdir=args.outdir, label=args.label,
         branches=args.branches, exclude=args.exclude, nbins=args.bins,
@@ -78,7 +80,8 @@ def main():
         max_events=args.maxevents, step_size=args.step_size,
         to_float32=not args.float64, verbose=not args.quiet,
         datacard_branches=args.datacard_branches,
-        datacard_signal=args.datacard_signal)
+        datacard_signal=args.datacard_signal, datacard_def=datacard_def,
+        axis_titles=axis_titles)
 
 
 if __name__ == "__main__":

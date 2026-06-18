@@ -26,8 +26,8 @@ NTUPLE_DIR = "/Users/manzoni/Documents/rjpsi_run3/ntuples/15jun26"  # EDIT
 # --- global MC normalisations -------------------------------------------------
 # (2) Tune the absolute Bc and Hb yields here. lumi * sigma / N_gen, times any
 #     k-factor / data-driven scale you want. These set the Bc:Hb *ratio*.
-BC_SCALE = 0.015 * 0.4267616659357488 * 1.03605435648848
-HB_SCALE = 0.04  * 0.8141294120498126 * 0.5831798345092318 # applied to both hb1 and hb2 (each keeps its own below if needed)
+BC_SCALE = 1.18 * 1.2 * 0.015 * 0.4267616659357488 * 1.03605435648848
+HB_SCALE = 1.18 * 0.95 * 0.04  * 0.8141294120498126 * 0.5831798345092318 # applied to both hb1 and hb2 (each keeps its own below if needed)
 MISID_SCALE = 1.0        # DATA fail-region count enters UNSCALED; only FR(pt) weights it.
                          # (was 0.05: an arbitrary 20x suppression of the data term while the
                          #  MC-subtraction terms used the genuine BC/HB scales -> the fake-factor
@@ -53,6 +53,8 @@ BINNING = {
 #     "m_miss2_sv"                 : (40, -10, 10),
     "m_miss2_jpsi"               : (20, -10, 10),
     "m_miss2_sv"                 : (20, -10, 10),
+#     "m_miss2_jpsi"               : (25, - 5, 10),
+#     "m_miss2_sv"                 : (25, - 5, 10),
     "q2_coll"                    : (22,   0, 11),
 
     "nu1_q2_jpsi"                : (40,   0, 12),
@@ -93,6 +95,16 @@ BINNING = {
     "jpsi_lxy":  np.logspace(-4, np.log10(2), 40),   # variable-width example
 }
 
+# --- axis-title overrides (issue 4) ------------------------------------------
+# cmsplot.binning.axis_label already turns branch names into LaTeX x-axis titles
+# (e.g. q2_coll -> "q^2 [GeV^2] (coll.)", mu_ip3d_jpsi_pv_sig -> "IP_3D(mu)/sigma
+# (J/psi dir., PV)"). Add exact-branch overrides here to refine any of them;
+# anything not listed uses the automatic resolver.
+AXIS_TITLES = {
+#     "q2_coll":     r"$q^{2}_{\mathrm{coll}}$ [GeV$^{2}$]",
+#     "m_miss2_jpsi": r"$m^{2}_{\mathrm{miss}}$ (J/$\psi$ dir.) [GeV$^{2}$]",
+}
+
 # =============================================================================
 # Bc cocktail components.  Each component = (label, colour, is_signal, [codes]).
 # Channel codes come straight from BC_CHANNELS in RJPsiGenHistory:
@@ -127,6 +139,53 @@ for _name, (_lab, _col, _sig, _codes) in COMPONENTS.items():
 _other = COMPONENTS["other"]
 BC_DEFAULT = (_other[0], _other[1], _other[2])
 
+# =============================================================================
+# Datacard composition (issue 3).  This is INDEPENDENT of the plotting split
+# above: it declares which contributions become which Combine template, so you
+# can change the fit granularity without touching the `samples` list.
+#
+# Format:
+#   DATACARD = {"signal": "<process name>",          # POI 'r' scales this one
+#               "processes": OrderedDict(name -> [selector, selector, ...])}
+# A selector picks Processes by origin; the first datacard process whose
+# selector list matches a given Process claims it. Selector shorthands:
+#   "bc"                      whole sample 'bc'
+#   ("bc", [1, 7])            sample 'bc', only these gen_bc_decay codes
+#   {"group": "misid"}        every read sharing stack-group 'misid'
+# NOTE: datacard codes must be a *superset* of a plotting component's codes --
+# you can merge plotting components but not subdivide one (it is already summed).
+#
+# Set DATACARD = None (or just don't define it) to fall back to the per-sample
+# `datacard=` tags (single collapsed "Bc" template, signal "Bc").
+#
+# Flip this to break the Bc cocktail into separate templates (signal = tau):
+SPLIT_BC_IN_DATACARD = True
+
+_DATACARD_SPLIT = {
+    "signal": "jpsi_tau",
+    "processes": OrderedDict([
+        ("jpsi_mu",  [("bc", COMPONENTS["jpsi_mu"][3])]),   # B_c -> J/psi mu nu
+        ("jpsi_tau", [("bc", COMPONENTS["jpsi_tau"][3])]),  # B_c -> J/psi tau nu (POI)
+        ("feeddown", [("bc", COMPONENTS["feeddown"][3])]),  # higher charmonia l nu
+        ("jpsi_D",   [("bc", COMPONENTS["jpsi_D"][3])]),    # J/psi + open charm
+        ("bc_other", [("bc",)]),                            # catch-all remaining Bc
+        ("Hb",       [("hb",)]),                            # inclusive Hb -> J/psi X
+        ("misID",    [{"group": "misid"}]),                 # data-driven fake bachelor
+    ]),
+}
+
+# Collapsed equivalent of the legacy behaviour (one Bc template, signal "Bc"):
+_DATACARD_MERGED = {
+    "signal": "Bc",
+    "processes": OrderedDict([
+        ("Bc",    [("bc",)]),
+        ("Hb",    [("hb",)]),
+        ("misID", [{"group": "misid"}]),
+    ]),
+}
+
+DATACARD = _DATACARD_SPLIT if SPLIT_BC_IN_DATACARD else _DATACARD_MERGED
+
 # keep every true Bc decay (codes 1..22 and the -1 "unknown"); the -1 rows are
 # routed to the "other" component by BC_DEFAULT. This is the exact complement of
 # EXCLUDE_BC below, so the Bc and Hb samples partition the J/psi-from-b phase space.
@@ -156,7 +215,16 @@ COMMON_SELECTION = " & ".join([
     "(jpsi_lxy<0.3)",
     "(p4_par_jpsi>0)",
     "(lxyz_sig<18)",
-    "(mu_ip3d_jpsi_pv_sig>0)"
+    "(mu_ip3d_jpsi_pv_sig>0)",
+
+    # extra handles to reduce bkg    
+#     "(nu1_jpsi_pz>0.)",
+#     "(mu_jpsi_e<2.5)",
+#     "(mcorr_jpsi<8)",
+#     "(cos_theta_l_nu2<0)",
+#     
+#     "(q2_coll>8)",
+    
 ])
 
 # =============================================================================
@@ -192,7 +260,7 @@ COMMON_SELECTION_FAIL = COMMON_SELECTION.replace(_MU_ISO_PASS, _MU_ISO_FAIL)
 # >>> PLACEHOLDER: flat FR = 0.4 in every pt bin.  Replace VALUES once measured.
 FR_PT_BRANCH = 'mu3_pt'
 FR_PT_EDGES  = [3, 4, 5, 6, 8, 10, 13, 17, np.inf]
-FR_PT_VALUES = 0.2 * np.array([1.8902, 1.7225, 1.3891, 1.1067, 0.9116, 0.8141, 0.7650, 0.8973])
+FR_PT_VALUES = 0.15 * np.array([1.8409, 1.6759, 1.3526, 1.0932, 0.8890, 0.8246, 0.7854, 0.9092])
 FR_TABLE = (FR_PT_BRANCH, FR_PT_EDGES, FR_PT_VALUES)
 
 # =============================================================================
