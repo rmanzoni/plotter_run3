@@ -511,7 +511,7 @@ class StackPlotter:
             rax.errorbar(centers[m], ratio[m], yerr=rerr[m], fmt="o",
                          color="black", markersize=4)
             rax.axhline(1.0, color="black", lw=1)
-            rax.set_ylim(0.0, 2.0)
+            rax.set_ylim(0.8, 1.2)
             rax.set_ylabel("Data / MC", fontsize="small")
             rax.set_xlabel(binning.axis_label(branch))
         else:

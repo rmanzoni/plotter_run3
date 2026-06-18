@@ -177,7 +177,7 @@ def plot_channel(f, fitdir, label, channel, outpath):
     p2.cd()
     frame = htot.Clone("frame")
     frame.Reset()
-    frame.GetYaxis().SetRangeUser(0.0, 2.0)
+    frame.GetYaxis().SetRangeUser(0.8, 1.2)
     frame.GetYaxis().SetTitle("Data / Fit")
     frame.GetYaxis().SetNdivisions(505)
     frame.GetYaxis().SetTitleSize(0.11)

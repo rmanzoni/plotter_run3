@@ -13,9 +13,31 @@ Processes are grouped by the ``datacard`` tag carried on each Sample/Process:
   ""                   -> excluded from the datacard (e.g. `combinatorial`).
 
 Templates are built from the NOMINAL weights (before any scale-to-data), so the
-fit is free to determine the normalisations: the signal (default "Bc") is scaled
-by the POI r, the remaining processes get free `rateParam`s, and `autoMCStats`
-covers bin-by-bin MC statistics.
+fit is free to determine the normalisations:
+
+  * all Bc contributions (every template originating from the ``bc`` sample,
+    the signal jpsi_tau included) are tied to ONE shared, unconstrained overall
+    normalisation ``bc_norm`` -- so the whole Bc cocktail moves together rather
+    than each component floating on its own;
+  * the signal (jpsi_tau) additionally carries the default POI ``r`` from
+    text2workspace, so its yield scales as ``r * bc_norm``. ``bc_norm`` is fixed
+    by the mu channel + cocktail, ``r`` is the tau-only excess on top of it, i.e.
+    the tau/mu ratio R(J/psi) (its absolute calibration follows the template
+    normalisation: r = R(J/psi)/R_SM if the tau template carries the SM BF, r =
+    R(J/psi) directly if it is normalised to the mu BF);
+  * each non-signal Bc contribution gets an independent ``lnN`` (default 10%);
+  * the non-Bc backgrounds (Hb, misID) keep their own free ``rateParam``;
+  * ``autoMCStats`` covers bin-by-bin MC statistics.
+
+In the collapsed/merged card (a single "Bc" template = signal) there is no
+second Bc process to tie, so ``bc_norm`` is omitted and the signal falls back to
+``r`` alone (legacy behaviour).
+
+The Bc set, the lnN size, and the bc_norm range can be overridden from the
+``datacard_def`` config via the optional keys ``bc_sample`` (default "bc"),
+``bc_lnn`` (default 0.10), ``bc_lnn_skip`` (tuple of Bc tags to leave without a
+lnN, e.g. ("jpsi_mu",) to keep the mu channel an uncertainty-free reference),
+``bc_norm_name`` and ``bc_norm_range``.
 """
 import os
 import numpy as np
@@ -160,7 +182,9 @@ def resolve_datacard_tags(procs, datacard_def, verbose=True):
 def write_datacards(procs, hg, branches, outdir, label, nbins=40,
                     signal="Bc", overflow=False, floor=1e-6,
                     rate_param_range=(0.0, 10.0), verbose=True,
-                    datacard_def=None):
+                    datacard_def=None, bc_sample="bc",
+                    bc_norm_name="bc_norm", bc_norm_range=(0.0, 10.0),
+                    bc_lnn=0.10, bc_lnn_skip=()):
     """Write a shape file + datacard per branch. Returns the datacards dir.
 
     If ``datacard_def`` is given it re-composes the datacard processes from the
@@ -180,6 +204,12 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
         tag_of, sig = resolve_datacard_tags(procs, datacard_def, verbose=verbose)
         if sig:
             signal = sig
+        # optional Bc-normalisation overrides carried on the same config dict
+        bc_sample = datacard_def.get("bc_sample", bc_sample)
+        bc_norm_name = datacard_def.get("bc_norm_name", bc_norm_name)
+        bc_norm_range = tuple(datacard_def.get("bc_norm_range", bc_norm_range))
+        bc_lnn = datacard_def.get("bc_lnn", bc_lnn)
+        bc_lnn_skip = tuple(datacard_def.get("bc_lnn_skip", bc_lnn_skip))
     else:
         tag_of = {}
 
@@ -189,6 +219,20 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
     obs_procs = _resolve_data_obs(procs)
     tags = _mc_tags(procs, signal, etag)
     lo, hi = rate_param_range
+
+    # Which datacard tags are Bc contributions? A tag is "Bc" if any process
+    # feeding it originates from the `bc` sample. These are tied together by the
+    # single shared `bc_norm` parameter in the card.
+    bc_tags = set()
+    for p in procs:
+        if p.is_data:
+            continue
+        t = etag(p)
+        if t in tags and getattr(p, "sample_name", "") == bc_sample:
+            bc_tags.add(t)
+    if signal not in bc_tags and verbose:
+        print("  ! datacard: signal %r is not a Bc-sample process; it will not "
+              "be tied to %s" % (signal, bc_norm_name))
 
     n_ok, n_skip, n_fail = 0, 0, 0
     for branch in branches:
@@ -243,7 +287,10 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
 
         # --- write datacard text ------------------------------------------
         _write_card(os.path.join(dcdir, "%s.txt" % branch), branch, tags, sw,
-                    d_sw, signal, lo, hi, obs_is_asimov)
+                    d_sw, signal, lo, hi, obs_is_asimov,
+                    bc_tags=bc_tags, bc_norm_name=bc_norm_name,
+                    bc_norm_range=bc_norm_range, bc_lnn=bc_lnn,
+                    bc_lnn_skip=bc_lnn_skip)
         n_ok += 1
 
         if verbose:
@@ -274,27 +321,45 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
     return dcdir
 
 
-def _write_card(path, channel, tags, sw, d_sw, signal, lo, hi, asimov):
+def _write_card(path, channel, tags, sw, d_sw, signal, lo, hi, asimov,
+                bc_tags=(), bc_norm_name="bc_norm", bc_norm_range=(0.0, 10.0),
+                bc_lnn=0.10, bc_lnn_skip=()):
     nbkg = len(tags) - 1
     procid = {t: (0 if t == signal else i)
               for i, t in enumerate([signal] + [t for t in tags if t != signal])}
 
-    # Column width MUST exceed the widest cell that will ever sit in a data
-    # column, otherwise %*s right-justifies with zero leading space and adjacent
-    # cells run together -- e.g. three "m_miss2_jpsi" bin cells printing as
-    # "m_miss2_jpsim_miss2_jpsim_miss2_jpsi", which Combine then cannot parse.
-    # The bin rows carry the *channel* (branch) name, not a process tag, so the
-    # old width (max tag length) was too small for any branch >= that length.
+    bc_set = set(bc_tags)
+    share_bc = len(bc_set) > 1            # a shared Bc norm needs >1 Bc process
+    skip = set(bc_lnn_skip)
+    lnn_tags = ([t for t in tags
+                 if t in bc_set and t != signal and t not in skip]
+                if (share_bc and bc_lnn) else [])
+    bnlo, bnhi = bc_norm_range
+
     rate_strs = {t: "%.4f" % sw[t].sum() for t in tags}
+
+    # Left label field: wide enough for the widest row label, *including* the
+    # systematic rows (which carry "<name> lnN" in that field). Value columns
+    # must in turn exceed the widest data cell, otherwise %*s right-justifies
+    # with zero leading space and adjacent cells run together -- e.g. three
+    # "m_miss2_jpsi" bin cells printing as one unparseable blob.
+    syst_names = [t + "_norm_unc" for t in lnn_tags]
+    namew = max([len(x) for x in
+                 (["observation", "process", "rate", "bin"]
+                  + list(tags) + syst_names)])
+    lead = max(14, namew + 5)             # room for "<name> lnN"
     widest = max([len(channel)]
                  + [len(t) for t in tags]
                  + [len(str(procid[t])) for t in tags]
                  + [len(rate_strs[t]) for t in tags])
-    col = max(12, widest + 2)                 # +2 guarantees >=2 spaces between cells
+    col = max(12, widest + 2)             # +2 guarantees >=2 spaces between cells
 
-    def row(headercells):
-        return "".join(["%-14s" % headercells[0]]
-                       + ["%*s" % (col, c) for c in headercells[1:]])
+    def row(cells):
+        return ("%-*s" % (lead, cells[0])) + "".join("%*s" % (col, c)
+                                                      for c in cells[1:])
+
+    def syst_row(name, typ, cells):
+        return row(["%-*s %s" % (namew, name, typ)] + cells)
 
     lines = []
     lines.append("# Combine datacard generated by cmsplot for branch '%s'"
@@ -310,19 +375,43 @@ def _write_card(path, channel, tags, sw, d_sw, signal, lo, hi, asimov):
                  % (channel, channel))
     lines.append("-" * 80)
     lines.append(row(["bin", channel]))
-    lines.append("%-14s%*d" % ("observation", col, int(round(d_sw.sum()))))
+    lines.append(row(["observation", "%d" % int(round(d_sw.sum()))]))
     lines.append("-" * 80)
     lines.append(row(["bin"] + [channel] * len(tags)))
     lines.append(row(["process"] + list(tags)))
     lines.append(row(["process"] + [str(procid[t]) for t in tags]))
     lines.append(row(["rate"] + [rate_strs[t] for t in tags]))
     lines.append("-" * 80)
-    # free-floating normalisations for the non-signal processes
+
+    # (1) ONE shared, unconstrained overall Bc normalisation. Repeating the SAME
+    #     parameter name on every Bc process ties them to a single factor; the
+    #     signal (jpsi_tau) additionally carries the default POI 'r' from
+    #     text2workspace, so its yield scales as r * bc_norm -- bc_norm is the
+    #     common Bc rate, r is the tau/mu ratio R(J/psi).
+    if share_bc:
+        for t in tags:
+            if t in bc_set:
+                lines.append("%-13s rateParam %s %s 1 [%g,%g]"
+                             % (bc_norm_name, channel, t, bnlo, bnhi))
+
+    # (2) every non-Bc background keeps its own free rateParam. In the collapsed
+    #     card (single Bc = signal) the Bc also falls through to r alone.
     for t in tags:
         if t == signal:
             continue
+        if share_bc and t in bc_set:
+            continue
         lines.append("%-13s rateParam %s %s 1 [%g,%g]"
                      % (t + "_norm", channel, t, lo, hi))
+
+    # (3) each non-signal Bc contribution gets an independent lnN. The signal
+    #     jpsi_tau is governed by r and bc_norm only (no extra BR nuisance).
+    if lnn_tags:
+        kappa = "%.3f" % (1.0 + bc_lnn)
+        for t in lnn_tags:
+            cells = [kappa if u == t else "-" for u in tags]
+            lines.append(syst_row(t + "_norm_unc", "lnN", cells))
+
     lines.append("* autoMCStats 0")
     lines.append("")
     with open(path, "w") as fh:
