@@ -12,7 +12,7 @@ gen_bc_decay convention (BcGenDecay / RJPsiGenHistory): 1..22 = real Bc channels
 """
 import numpy as np
 from collections import OrderedDict
-from cmsplot import Sample, Derived, p4_ptetaphim, invariant_mass, MASS_K
+from cmsplot import Sample, Derived, p4_ptetaphim, invariant_mass, MASS_K, MASS_PI
 from cmsplot.style import PETROFF_10 as P
 
 # --- run conditions -----------------------------------------------------------
@@ -96,7 +96,8 @@ BINNING = {
 
     # derived: m(J/psi K+) with the bachelor under the kaon hypothesis. True
     # B+ -> J/psi K+ piles up at the B+ mass (5.279); everything else smears.
-    "jpsi_k_mass": (60, 4.8, 6.0),
+    "jpsi_k_mass": (50, 4.5, 7.0),
+    "jpsi_pi_mass": (50, 4.5, 7.0),
 }
 
 # --- derived variables (computed on the fly from existing branches) ----------
@@ -104,22 +105,33 @@ BINNING = {
 # first-class column: plot it (--branches jpsi_k_mass), give it a BINNING /
 # AXIS_TITLES entry by name, or feed a datacard (--datacard-branches jpsi_k_mass).
 #
-# Example: reconstruct the B+ -> J/psi K+ mass to slice that background out. The
-# J/psi is the refitted, mass-constrained four-vector (jpsi_rf_{pt,eta,phi,mass});
-# the bachelor muon (mu3) is re-interpreted with the charged-KAON mass instead of
-# the muon mass, so genuine B+ -> J/psi K+ events peak at m(B+) while combinatorial
-# and other Bc/Hb modes spread out.
-def _jpsi_k_mass(a):
-    jpsi = p4_ptetaphim(a["jpsi_rf_pt"], a["jpsi_rf_eta"],
-                        a["jpsi_rf_phi"], a["jpsi_rf_mass"])
-    kaon = p4_ptetaphim(a["mu3_pt"], a["mu3_eta"], a["mu3_phi"], MASS_K)
-    return invariant_mass(jpsi + kaon)
+# Example: reconstruct the B+ -> J/psi h+ mass under an arbitrary bachelor mass
+# hypothesis, to slice those backgrounds out. The J/psi is the refitted,
+# mass-constrained four-vector (jpsi_rf_{pt,eta,phi,mass}); the bachelor muon
+# (mu3) is re-interpreted with the chosen hadron mass instead of the muon mass,
+# so genuine B+ -> J/psi K+ (or J/psi pi+) events peak at m(B+) while
+# combinatorial and other Bc/Hb modes spread out.
+#
+# `Derived.func` is always called as func(arrays), so to parametrise the mass we
+# BIND it with a closure (factory below). `inputs` must list only real branches.
+_JPSI_HAD_INPUTS = ("jpsi_rf_pt", "jpsi_rf_eta", "jpsi_rf_phi", "jpsi_rf_mass",
+                    "mu3_pt", "mu3_eta", "mu3_phi")
+
+def jpsi_had_mass(had_mass):
+    """Return a Derived computing m(J/psi + bachelor) for the given bachelor
+    mass hypothesis (e.g. MASS_K, MASS_PI, MASS_PROTON, MASS_MU)."""
+    def _f(a, _m=had_mass):
+        jpsi   = p4_ptetaphim(a["jpsi_rf_pt"], a["jpsi_rf_eta"],
+                              a["jpsi_rf_phi"], a["jpsi_rf_mass"])
+        hadron = p4_ptetaphim(a["mu3_pt"], a["mu3_eta"], a["mu3_phi"], _m)
+        return invariant_mass(jpsi + hadron)
+    return Derived(func=_f, inputs=_JPSI_HAD_INPUTS)
 
 DERIVED = {
-    "jpsi_k_mass": Derived(
-        func=_jpsi_k_mass,
-        inputs=("jpsi_rf_pt", "jpsi_rf_eta", "jpsi_rf_phi", "jpsi_rf_mass",
-                "mu3_pt", "mu3_eta", "mu3_phi")),
+    "jpsi_k_mass":  jpsi_had_mass(MASS_K),
+    "jpsi_pi_mass": jpsi_had_mass(MASS_PI),
+    # add any hypothesis in one line, e.g.:
+    # "jpsi_p_mass": jpsi_had_mass(MASS_PROTON),
 }
 
 # --- axis-title overrides (issue 4) ------------------------------------------
@@ -129,6 +141,7 @@ DERIVED = {
 # anything not listed uses the automatic resolver.
 AXIS_TITLES = {
     "jpsi_k_mass": r"$m(J/\psi\,K^{+})$ [GeV]",
+    "jpsi_pi_mass": r"$m(J/\psi\,\pi^{+})$ [GeV]",
 #     "q2_coll":     r"$q^{2}_{\mathrm{coll}}$ [GeV$^{2}$]",
 #     "m_miss2_jpsi": r"$m^{2}_{\mathrm{miss}}$ (J/$\psi$ dir.) [GeV$^{2}$]",
 }
@@ -236,14 +249,15 @@ COMMON_SELECTION = " & ".join([
     "(mu2_pt > 3)",
     "(jpsi_lxy_sig > 3)",
 #     "(mu3_id_tight > 0.5)",
-    "(mu3_id_soft_mva > 0.5)",
-    "(mu_ip3d_jpsi_sv_sig > -3)",
+#     "(mu3_id_soft_mva > 0.5)",
+#     "(mu_ip3d_jpsi_sv_sig > -3)",
     "(mass < 6.275)",
 #     "(mass > 6.275)",
     "(jpsi_lxy<0.3)",
     "(p4_par_jpsi>0)",
     "(lxyz_sig<18)",
     "(mu_ip3d_jpsi_pv_sig>0)",
+    "(np.abs(jpsi_k_mass-5.27)>0.1)",
 
     # extra handles to reduce bkg    
 #     "(nu1_jpsi_pz>0.)",
