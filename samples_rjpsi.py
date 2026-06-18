@@ -26,8 +26,8 @@ NTUPLE_DIR = "/Users/manzoni/Documents/rjpsi_run3/ntuples/15jun26"  # EDIT
 # --- global MC normalisations -------------------------------------------------
 # (2) Tune the absolute Bc and Hb yields here. lumi * sigma / N_gen, times any
 #     k-factor / data-driven scale you want. These set the Bc:Hb *ratio*.
-BC_SCALE = 1.18 * 1.2 * 0.015 * 0.4267616659357488 * 1.03605435648848
-HB_SCALE = 1.18 * 0.95 * 0.04  * 0.8141294120498126 * 0.5831798345092318 # applied to both hb1 and hb2 (each keeps its own below if needed)
+BC_SCALE = 1.19 * 1.18 * 1.2 * 0.015 * 0.4267616659357488 * 1.03605435648848
+HB_SCALE = 1.19 * 1.18 * 0.95 * 0.04  * 0.8141294120498126 * 0.5831798345092318 # applied to both hb1 and hb2 (each keeps its own below if needed)
 MISID_SCALE = 1.0        # DATA fail-region count enters UNSCALED; only FR(pt) weights it.
                          # (was 0.05: an arbitrary 20x suppression of the data term while the
                          #  MC-subtraction terms used the genuine BC/HB scales -> the fake-factor
@@ -47,8 +47,8 @@ BINNING = {
 
     "mass":  (40, 2.5, 8),
 
-    "q2_jpsi"                    : (40, -10, 12),
-    "q2_sv"                      : (40, -10, 12),
+    "q2_jpsi"                    : (20, -10, 12),
+    "q2_sv"                      : (20, -10, 12),
 #     "m_miss2_jpsi"               : (40, -10, 10),
 #     "m_miss2_sv"                 : (40, -10, 10),
     "m_miss2_jpsi"               : (20, -10, 10),
@@ -57,26 +57,26 @@ BINNING = {
 #     "m_miss2_sv"                 : (25, - 5, 10),
     "q2_coll"                    : (22,   0, 11),
 
-    "nu1_q2_jpsi"                : (40,   0, 12),
-    "nu2_q2_jpsi"                : (40,   0, 12),
-    "nu1_q2_sv"                  : (40,   0, 12),
-    "nu2_q2_sv"                  : (40,   0, 12),
+    "nu1_q2_jpsi"                : (24,   0, 12),
+    "nu2_q2_jpsi"                : (24,   0, 12),
+    "nu1_q2_sv"                  : (24,   0, 12),
+    "nu2_q2_sv"                  : (24,   0, 12),
 
-    "mu_ip3d_jpsi_pv"            : (40, - 0.1, 0.1 ),
-    "mu_ip3d_jpsi_pv_err"        : (40,   0  , 0.02),
-    "mu_ip3d_jpsi_pv_sig"        : (50, - 5  , 10  ),
+    "mu_ip3d_jpsi_pv"            : (40,  - 0.04, 0.04),
+    "mu_ip3d_jpsi_pv_err"        : (40,   0    , 0.02),
+    "mu_ip3d_jpsi_pv_sig"        : (50, - 5    , 10  ),
 
-    "mu_ip3d_jpsi_sv"            : (40, - 0.1, 0.1 ),
-    "mu_ip3d_jpsi_sv_err"        : (40,   0  , 0.02),
-    "mu_ip3d_jpsi_sv_sig"        : (50, - 5  , 5   ),
+    "mu_ip3d_jpsi_sv"            : (40,  - 0.04, 0.04),
+    "mu_ip3d_jpsi_sv_err"        : (40,   0    , 0.02),
+    "mu_ip3d_jpsi_sv_sig"        : (50, - 5    , 5   ),
 
-    "mu_ip3d_sv_pv"              : (40, - 0.1, 0.1 ),
-    "mu_ip3d_sv_pv_err"          : (40,   0  , 0.02),
-    "mu_ip3d_sv_pv_sig"          : (50, - 5  , 10  ),
+    "mu_ip3d_sv_pv"              : (40, - 0.04, 0.04 ),
+    "mu_ip3d_sv_pv_err"          : (40,   0   , 0.02 ),
+    "mu_ip3d_sv_pv_sig"          : (50, - 5   , 10   ),
 
-    "mu_ip3d_sv_sv"              : (40, - 0.1, 0.1 ),
-    "mu_ip3d_sv_sv_err"          : (40,   0  , 0.02),
-    "mu_ip3d_sv_sv_sig"          : (50, - 5  , 5   ),
+    "mu_ip3d_sv_sv"              : (40, - 0.04, 0.04 ),
+    "mu_ip3d_sv_sv_err"          : (40,   0   , 0.02 ),
+    "mu_ip3d_sv_sv_sig"          : (50, - 5   , 5    ),
 
     "mu_dist_to_b_dir_jpsi"      : (40,   0  , 0.03),
     "mu_dist_to_b_dir_jpsi_err"  : (40,   0  , 0.02),
@@ -86,10 +86,10 @@ BINNING = {
     "mu_dist_to_b_dir_sv_err"    : (40,   0  , 0.02),
     "mu_dist_to_b_dir_sv_sig"    : (50, - 5  , 5   ),
 
-    "mu_dist_along_b_dir_jpsi_pv": (40,  0, 0.6),
-    "mu_dist_along_b_dir_jpsi_sv": (40,  0, 0.4),
-    "mu_dist_along_b_dir_sv_pv"  : (40,  0, 0.6),
-    "mu_dist_along_b_dir_sv_sv"  : (40,  0, 0.4),
+    "mu_dist_along_b_dir_jpsi_pv": (40,  -1, 0.6),
+    "mu_dist_along_b_dir_jpsi_sv": (40,  -1, 0.4),
+    "mu_dist_along_b_dir_sv_pv"  : (40,  -1, 0.6),
+    "mu_dist_along_b_dir_sv_sv"  : (40,  -1, 0.4),
 
     "lxy"     :  np.logspace(-4, np.log10(2), 40),   # variable-width example
     "jpsi_lxy":  np.logspace(-4, np.log10(2), 40),   # variable-width example
@@ -238,6 +238,10 @@ JPSI_IN  = "(np.abs(jpsi_mass - 3.0969) < 0.1)"
 # JPSI_IN  = "1"
 JPSI_OUT = "(np.abs(jpsi_mass - 3.0969) > 0.15)"
 
+
+BC_GEN_MATCH = "(mu1_gen_role==1) & (mu2_gen_role==1) & (mu3_gen_role==2)"
+
+
 # common selection
 COMMON_SELECTION = " & ".join([
 #     "(np.abs(jpsi_mass - 3.0969) < 0.1)",
@@ -249,14 +253,15 @@ COMMON_SELECTION = " & ".join([
     "(mu2_pt > 3)",
     "(jpsi_lxy_sig > 3)",
 #     "(mu3_id_tight > 0.5)",
-#     "(mu3_id_soft_mva > 0.5)",
+    "(mu3_id_soft_mva > 0.5)",
 #     "(mu_ip3d_jpsi_sv_sig > -3)",
-    "(mass < 6.275)",
+#     "(mass < 6.275)",
+    "(mass < 6.1)",
 #     "(mass > 6.275)",
     "(jpsi_lxy<0.3)",
     "(p4_par_jpsi>0)",
     "(lxyz_sig<18)",
-    "(mu_ip3d_jpsi_pv_sig>0)",
+#     "(mu_ip3d_jpsi_pv_sig>0)",
     "(np.abs(jpsi_k_mass-5.27)>0.1)",
 
     # extra handles to reduce bkg    
@@ -314,7 +319,7 @@ samples = [
         datacard="Bc",                   # all gen_bc_decay components -> one Bc template
         scale=BC_SCALE,                  # lumi * sigma(Bc) / N_gen  (see top)
         weight_branches=[],              # e.g. ["puWeight", "ctau_weight_central"]
-        selection=f"({COMMON_SELECTION}) & ({KEEP_BC}) & ({JPSI_IN})" ,
+        selection=f"({COMMON_SELECTION}) & ({KEEP_BC}) & ({JPSI_IN}) & ({BC_GEN_MATCH})" ,
         split_by="gen_bc_decay",
         split_map=BC_SPLIT,
         split_default=BC_DEFAULT,

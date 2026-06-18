@@ -12,11 +12,19 @@ from __future__ import annotations
 
 import os
 import glob as _glob
+import multiprocessing as _mp
 from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from typing import Optional
 
 import numpy as np
+
+# Force a non-interactive backend BEFORE `style` triggers the first pyplot
+# import. This makes fork-based plotting workers safe everywhere (a GUI backend
+# imported pre-fork can deadlock/crash children) and avoids backend probing on
+# headless worker nodes.
+import matplotlib
+matplotlib.use("Agg")
 
 from . import style, binning
 from .derived import Derived, expand_inputs, compute_derived
@@ -594,6 +602,31 @@ class StackPlotter:
 
 
 # ---------------------------------------------------------------------------
+# Parallel plotting (fork + copy-on-write)
+# ---------------------------------------------------------------------------
+# matplotlib's pyplot state is process-global and not thread-safe, and the
+# artist/layout code holds the GIL, so the per-branch draw loop does not scale
+# with threads -- it needs separate processes. We avoid pickling the (large)
+# in-memory arrays to every worker by using a *fork* pool: the parent stashes
+# the already-loaded Process list and a StackPlotter in a module global before
+# forking, and each worker inherits them copy-on-write (plotting only reads
+# them, so the pages are never actually copied). Tasks then carry only the
+# branch name + its precomputed bin edges, which are tiny.
+_PLOT_STATE: dict = {}
+
+
+def _draw_one(task):
+    branch, edges, outdir, label, nbins = task
+    procs = _PLOT_STATE["procs"]
+    plotter = _PLOT_STATE["plotter"]
+    try:
+        plotter.draw(branch, edges, procs, outdir, label, nbins=nbins)
+        return (branch, None)
+    except Exception as e:                 # never let one bad branch kill the run
+        return (branch, "%s" % e)
+
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 def run(samples, outdir="plots", label=None, branches=None, exclude=(),
@@ -687,14 +720,35 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
 
     plotter = StackPlotter(lumi=lumi, com=com, extra=extra, normalize=normalize,
                            overflow=overflow)
-    for i, b in enumerate(todo, 1):
-        edges = hg.edges_for(b, nbins=nbins)
+
+    # Bin edges depend on the loaded arrays (held in the parent), so compute them
+    # here once; workers then only need (branch, edges).
+    edges_map = {b: hg.edges_for(b, nbins=nbins) for b in todo}
+
+    if jobs > 1 and len(todo) > 1 and "fork" in _mp.get_all_start_methods():
+        # fork pool: workers inherit `procs`/`plotter` copy-on-write (no array
+        # pickling). matplotlib state is per-process, so draws never collide.
+        _PLOT_STATE["procs"] = procs
+        _PLOT_STATE["plotter"] = plotter
+        tasks = [(b, edges_map[b], outdir, label, nbins) for b in todo]
         try:
-            plotter.draw(b, edges, procs, outdir, label, nbins=nbins)
-        except Exception as e:  # never let one bad branch kill the run
-            print("  ! skipping %s (%s)" % (b, e))
-        if verbose and i % 20 == 0:
-            print("    ... %d/%d" % (i, len(todo)))
+            ctx = _mp.get_context("fork")
+            with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as ex:
+                for i, (b, err) in enumerate(ex.map(_draw_one, tasks), 1):
+                    if err:
+                        print("  ! skipping %s (%s)" % (b, err))
+                    if verbose and i % 20 == 0:
+                        print("    ... %d/%d" % (i, len(todo)))
+        finally:
+            _PLOT_STATE.clear()
+    else:
+        for i, b in enumerate(todo, 1):
+            try:
+                plotter.draw(b, edges_map[b], procs, outdir, label, nbins=nbins)
+            except Exception as e:  # never let one bad branch kill the run
+                print("  ! skipping %s (%s)" % (b, e))
+            if verbose and i % 20 == 0:
+                print("    ... %d/%d" % (i, len(todo)))
 
     _write_yields(procs, outdir, label)
     _write_selection(samples, outdir, label,
