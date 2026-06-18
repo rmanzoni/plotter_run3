@@ -138,7 +138,9 @@ def _needed_columns(sample, needed_plot, derived=None):
     """
     if needed_plot is None:
         return None  # plotting every branch -> need them all
-    want = expand_inputs(needed_plot, derived) | _names_in_expr(sample.selection) \
+    # selection may itself reference derived variables -> read their real inputs
+    want = expand_inputs(needed_plot, derived) \
+        | expand_inputs(_names_in_expr(sample.selection), derived) \
         | set(sample.weight_branches)
     if sample.split_by:
         want.add(sample.split_by)
@@ -174,6 +176,13 @@ def _read_sample(sample, needed_plot=None, max_events=-1,
         return {}
 
     paths = [f + ":" + sample.tree for f in files]
+    # Derived variables referenced in the SELECTION must exist before the
+    # per-chunk mask is evaluated, so compute those up front (per chunk). The
+    # remaining derived variables are computed once, after selection, on the
+    # (smaller) surviving arrays.
+    sel_derived = ({k: v for k, v in derived.items()
+                    if k in _names_in_expr(sample.selection)}
+                   if derived else {})
     survivors, read_total = [], 0
     for chunk in uproot.iterate(paths, expressions=read_list, library="np",
                                 step_size=step_size):
@@ -182,6 +191,8 @@ def _read_sample(sample, needed_plot=None, max_events=-1,
         if not chunk:
             continue
         read_total += len(next(iter(chunk.values())))
+        if sel_derived:                       # make them available to selection
+            compute_derived(chunk, sel_derived, to_float32=False)
         mask = _selection_mask(chunk, sample.selection)
         if mask.any():
             survivors.append({
@@ -195,7 +206,8 @@ def _read_sample(sample, needed_plot=None, max_events=-1,
         return {}
     keys = set(survivors[0])
     out = {k: np.concatenate([s[k] for s in survivors]) for k in keys}
-    # add any derived columns (skips a var whose inputs are absent here)
+    # add any remaining derived columns (skips ones already built above, and any
+    # whose inputs are absent in this sample)
     return compute_derived(out, derived, to_float32=to_float32)
 
 
