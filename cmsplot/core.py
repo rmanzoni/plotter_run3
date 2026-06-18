@@ -19,6 +19,7 @@ from typing import Optional
 import numpy as np
 
 from . import style, binning
+from .derived import Derived, expand_inputs, compute_derived
 
 
 # ---------------------------------------------------------------------------
@@ -129,11 +130,15 @@ def _names_in_expr(expr):
             if isinstance(n, ast.Name)} - {"np"}
 
 
-def _needed_columns(sample, needed_plot):
-    """Columns we must read for this sample, or None to read all numeric ones."""
+def _needed_columns(sample, needed_plot, derived=None):
+    """Columns we must read for this sample, or None to read all numeric ones.
+
+    ``needed_plot`` may contain derived-variable names; those are resolved to the
+    real branches their funcs consume (so the ntuple is still pruned tightly).
+    """
     if needed_plot is None:
         return None  # plotting every branch -> need them all
-    want = set(needed_plot) | _names_in_expr(sample.selection) \
+    want = expand_inputs(needed_plot, derived) | _names_in_expr(sample.selection) \
         | set(sample.weight_branches)
     if sample.split_by:
         want.add(sample.split_by)
@@ -143,12 +148,13 @@ def _needed_columns(sample, needed_plot):
 
 
 def _read_sample(sample, needed_plot=None, max_events=-1,
-                 step_size="150 MB", to_float32=True):
+                 step_size="150 MB", to_float32=True, derived=None):
     """Stream a sample's files, keeping only needed columns and selected rows.
 
     Reads in chunks (uproot.iterate), applies the per-sample selection to each
     chunk and retains only surviving rows, so peak memory is ~one chunk plus the
-    (usually small) selected subset -- not the whole input.
+    (usually small) selected subset -- not the whole input. Any configured
+    derived variables are computed on the surviving arrays before returning.
     """
     import uproot
 
@@ -162,7 +168,7 @@ def _read_sample(sample, needed_plot=None, max_events=-1,
         avail = [k for k, t in tree.typenames().items()
                  if any(s in t for s in
                         ("int", "float", "double", "bool", "short", "long"))]
-    want = _needed_columns(sample, needed_plot)
+    want = _needed_columns(sample, needed_plot, derived)
     read_list = avail if want is None else [b for b in avail if b in want]
     if not read_list:
         return {}
@@ -188,7 +194,9 @@ def _read_sample(sample, needed_plot=None, max_events=-1,
     if not survivors:
         return {}
     keys = set(survivors[0])
-    return {k: np.concatenate([s[k] for s in survivors]) for k in keys}
+    out = {k: np.concatenate([s[k] for s in survivors]) for k in keys}
+    # add any derived columns (skips a var whose inputs are absent here)
+    return compute_derived(out, derived, to_float32=to_float32)
 
 
 def _selection_mask(arrays, expr):
@@ -309,7 +317,7 @@ class Histogrammer:
 
     def __init__(self, samples, jobs=4, max_events=-1, max_range_events=300_000,
                  binning_overrides=None, needed_plot=None, step_size="150 MB",
-                 to_float32=True):
+                 to_float32=True, derived=None):
         self.samples = list(samples)
         self.jobs = jobs
         self.max_events = max_events
@@ -318,6 +326,7 @@ class Histogrammer:
         self.needed_plot = needed_plot          # set of branches to plot, or None
         self.step_size = step_size
         self.to_float32 = to_float32
+        self.derived = derived or {}
         self.processes: list[Process] = []
 
     def _needed_set(self):
@@ -331,7 +340,7 @@ class Histogrammer:
         need = self._needed_set()
         with ThreadPoolExecutor(max_workers=self.jobs) as ex:
             futs = {ex.submit(_read_sample, s, need, self.max_events,
-                              self.step_size, self.to_float32): s
+                              self.step_size, self.to_float32, self.derived): s
                     for s in self.samples}
             for fut, s in futs.items():
                 raw[s.name] = fut.result()
@@ -581,8 +590,13 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
         binning_overrides=None, max_events=-1, step_size="150 MB",
         to_float32=True, verbose=True,
         datacard_branches=None, datacard_signal="Bc", datacard_def=None,
-        axis_titles=None):
-    """Load samples and produce one stacked plot per branch."""
+        axis_titles=None, derived=None):
+    """Load samples and produce one stacked plot per branch.
+
+    ``derived`` is an optional ``{name: Derived(func, inputs)}`` mapping of new
+    columns to compute from existing branches (see cmsplot.derived). Derived
+    names may be used in ``branches`` and ``datacard_branches`` like real ones.
+    """
     from datetime import datetime
 
     # merge any config-supplied exact branch->axis-title overrides (issue 4)
@@ -592,13 +606,17 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
         label = datetime.now().strftime("%d%b%Y_%Hh%Mm%Ss")
 
     # If a branch list is given, read ONLY those columns (plus selection/weight/
-    # split columns) -- this is what keeps memory bounded on large samples.
+    # split columns, and any datacard-only branches) -- this is what keeps memory
+    # bounded on large samples. Derived names here are resolved to their real
+    # input branches by the reader.
     needed_plot = set(branches) if branches else None
+    if needed_plot is not None and datacard_branches:
+        needed_plot |= set(datacard_branches)
 
     hg = Histogrammer(samples, jobs=jobs, max_events=max_events,
                       binning_overrides=binning_overrides,
                       needed_plot=needed_plot, step_size=step_size,
-                      to_float32=to_float32)
+                      to_float32=to_float32, derived=derived)
     if verbose:
         print("[cmsplot] reading %d samples (%s) ..."
               % (len(list(samples)),

@@ -71,6 +71,7 @@ def main():
     scale_to_data = args.scale_to_data or getattr(cfg, "SCALE_TO_DATA", False)
     datacard_def = getattr(cfg, "DATACARD", None)
     axis_titles = getattr(cfg, "AXIS_TITLES", None)
+    derived = getattr(cfg, "DERIVED", None)
 
     run(samples, outdir=args.outdir, label=args.label,
         branches=args.branches, exclude=args.exclude, nbins=args.bins,
@@ -81,7 +82,7 @@ def main():
         to_float32=not args.float64, verbose=not args.quiet,
         datacard_branches=args.datacard_branches,
         datacard_signal=args.datacard_signal, datacard_def=datacard_def,
-        axis_titles=axis_titles)
+        axis_titles=axis_titles, derived=derived)
 
 
 if __name__ == "__main__":

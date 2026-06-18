@@ -12,7 +12,7 @@ gen_bc_decay convention (BcGenDecay / RJPsiGenHistory): 1..22 = real Bc channels
 """
 import numpy as np
 from collections import OrderedDict
-from cmsplot import Sample
+from cmsplot import Sample, Derived, p4_ptetaphim, invariant_mass, MASS_K
 from cmsplot.style import PETROFF_10 as P
 
 # --- run conditions -----------------------------------------------------------
@@ -93,6 +93,33 @@ BINNING = {
 
     "lxy"     :  np.logspace(-4, np.log10(2), 40),   # variable-width example
     "jpsi_lxy":  np.logspace(-4, np.log10(2), 40),   # variable-width example
+
+    # derived: m(J/psi K+) with the bachelor under the kaon hypothesis. True
+    # B+ -> J/psi K+ piles up at the B+ mass (5.279); everything else smears.
+    "jpsi_k_mass": (60, 4.8, 6.0),
+}
+
+# --- derived variables (computed on the fly from existing branches) ----------
+# DERIVED = {name: Derived(func, inputs)} -- see cmsplot.derived. Each becomes a
+# first-class column: plot it (--branches jpsi_k_mass), give it a BINNING /
+# AXIS_TITLES entry by name, or feed a datacard (--datacard-branches jpsi_k_mass).
+#
+# Example: reconstruct the B+ -> J/psi K+ mass to slice that background out. The
+# J/psi is the refitted, mass-constrained four-vector (jpsi_rf_{pt,eta,phi,mass});
+# the bachelor muon (mu3) is re-interpreted with the charged-KAON mass instead of
+# the muon mass, so genuine B+ -> J/psi K+ events peak at m(B+) while combinatorial
+# and other Bc/Hb modes spread out.
+def _jpsi_k_mass(a):
+    jpsi = p4_ptetaphim(a["jpsi_rf_pt"], a["jpsi_rf_eta"],
+                        a["jpsi_rf_phi"], a["jpsi_rf_mass"])
+    kaon = p4_ptetaphim(a["mu3_pt"], a["mu3_eta"], a["mu3_phi"], MASS_K)
+    return invariant_mass(jpsi + kaon)
+
+DERIVED = {
+    "jpsi_k_mass": Derived(
+        func=_jpsi_k_mass,
+        inputs=("jpsi_rf_pt", "jpsi_rf_eta", "jpsi_rf_phi", "jpsi_rf_mass",
+                "mu3_pt", "mu3_eta", "mu3_phi")),
 }
 
 # --- axis-title overrides (issue 4) ------------------------------------------
@@ -101,6 +128,7 @@ BINNING = {
 # (J/psi dir., PV)"). Add exact-branch overrides here to refine any of them;
 # anything not listed uses the automatic resolver.
 AXIS_TITLES = {
+    "jpsi_k_mass": r"$m(J/\psi\,K^{+})$ [GeV]",
 #     "q2_coll":     r"$q^{2}_{\mathrm{coll}}$ [GeV$^{2}$]",
 #     "m_miss2_jpsi": r"$m^{2}_{\mathrm{miss}}$ (J/$\psi$ dir.) [GeV$^{2}$]",
 }
