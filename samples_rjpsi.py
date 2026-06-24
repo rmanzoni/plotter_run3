@@ -26,8 +26,8 @@ NTUPLE_DIR = "/Users/manzoni/Documents/rjpsi_run3/ntuples/15jun26"  # EDIT
 # --- global MC normalisations -------------------------------------------------
 # (2) Tune the absolute Bc and Hb yields here. lumi * sigma / N_gen, times any
 #     k-factor / data-driven scale you want. These set the Bc:Hb *ratio*.
-BC_SCALE = 1.19 * 1.18 * 1.2 * 0.015 * 0.4267616659357488 * 1.03605435648848
-HB_SCALE = 1.19 * 1.18 * 0.95 * 0.04  * 0.8141294120498126 * 0.5831798345092318 # applied to both hb1 and hb2 (each keeps its own below if needed)
+BC_SCALE = 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 1.2 * 0.015 * 0.4267616659357488 * 1.03605435648848
+HB_SCALE = 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 0.95 * 0.04  * 0.8141294120498126 * 0.5831798345092318 # applied to both hb1 and hb2 (each keeps its own below if needed)
 MISID_SCALE = 1.0        # DATA fail-region count enters UNSCALED; only FR(pt) weights it.
                          # (was 0.05: an arbitrary 20x suppression of the data term while the
                          #  MC-subtraction terms used the genuine BC/HB scales -> the fake-factor
@@ -254,14 +254,14 @@ COMMON_SELECTION = " & ".join([
     "(jpsi_lxy_sig > 3)",
 #     "(mu3_id_tight > 0.5)",
     "(mu3_id_soft_mva > 0.5)",
-#     "(mu_ip3d_jpsi_sv_sig > -3)",
+    "(mu_ip3d_jpsi_sv_sig > -3)",
 #     "(mass < 6.275)",
     "(mass < 6.1)",
 #     "(mass > 6.275)",
     "(jpsi_lxy<0.3)",
     "(p4_par_jpsi>0)",
     "(lxyz_sig<18)",
-#     "(mu_ip3d_jpsi_pv_sig>0)",
+    "(mu_ip3d_jpsi_pv_sig>0)",
     "(np.abs(jpsi_k_mass-5.27)>0.1)",
 
     # extra handles to reduce bkg    
@@ -307,9 +307,9 @@ COMMON_SELECTION_FAIL = COMMON_SELECTION.replace(_MU_ISO_PASS, _MU_ISO_FAIL)
 # >>> PLACEHOLDER: flat FR = 0.4 in every pt bin.  Replace VALUES once measured.
 FR_PT_BRANCH = 'mu3_pt'
 FR_PT_EDGES  = [3, 4, 5, 6, 8, 10, 13, 17, np.inf]
-FR_PT_VALUES = 0.15 * np.array([1.8409, 1.6759, 1.3526, 1.0932, 0.8890, 0.8246, 0.7854, 0.9092])
+# FR_PT_VALUES = 0.15 * np.array([1.8397, 1.6658, 1.3692, 1.1056, 0.8944, 0.8107, 0.7505, 0.8603]) # with loose selection
+FR_PT_VALUES = 0.35 * np.array([0.6799, 0.7029, 0.5096, 0.6518, 0.4602, 0.6667, 0.5758, 2.3333]) # with the same selection as here
 FR_TABLE = (FR_PT_BRANCH, FR_PT_EDGES, FR_PT_VALUES)
-
 # =============================================================================
 samples = [
     # --- dedicated Bc signal+cocktail MC --------------------------------------
