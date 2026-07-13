@@ -35,14 +35,48 @@ FITS = {
     # "shapes_fit_b": "Post-fit (B-only)",   # uncomment to add
 }
 
-# optional: fix colours per process name; unlisted procs get auto colours.
+# --- colours: match the cmsplot stack plotter exactly ------------------------
+# The plotter (cmsplot/style.py) uses M. Petroff's CVD-safe 10-colour set
+# (arXiv:2107.02270, == ROOT kP10*). Reproduce it here and map every Combine
+# datacard process to the SAME palette index its plotting component uses in
+# samples_rjpsi.py::COMPONENTS, so the pre/post-fit stacks are colour-consistent
+# with the input distributions produced by `plot.py`.
+PETROFF_10 = ["#3f90da", "#ffa90e", "#bd1f01", "#94a4a2", "#832db6",
+              "#a96b59", "#e76300", "#b9ac70", "#717581", "#92dadd"]
+_P = [ROOT.TColor.GetColor(h) for h in PETROFF_10]
+
+# datacard process name -> colour. Names are the templates written by
+# cmsplot.datacard from _DATACARD_SPLIT (jpsi_mu, jpsi_tau, feeddown, jpsi_D,
+# bc_other, Hb, misID, combinatorial); the collapsed-card "Bc" is covered too.
+# Indices mirror COMPONENTS, e.g. jpsi_D stays Petroff[4] (purple) in both.
 PROC_STYLE = {
-    # "signal":   ROOT.kRed + 1,
-    # "bkg_comb": ROOT.kAzure + 1,
+    "jpsi_mu":       _P[0],
+    "feeddown":      _P[1],
+    "jpsi_tau":      _P[2],   # signal (POI r)
+    "bc_other":      _P[3],
+    "jpsi_D":        _P[4],
+    "Hb":            _P[5],
+    "combinatorial": _P[8],
+    "misID":         _P[9],
+    "Bc":            _P[2],   # merged/collapsed card (single Bc template)
 }
-PALETTE = [ROOT.kAzure + 1, ROOT.kOrange + 1, ROOT.kGreen + 2, ROOT.kRed + 1,
-           ROOT.kViolet + 1, ROOT.kCyan + 2, ROOT.kYellow + 1, ROOT.kGray + 1,
-           ROOT.kMagenta + 1, ROOT.kSpring + 4]
+
+# datacard process name -> legend label (ROOT TLatex), matching the plotter.
+PROC_LABEL = {
+    "jpsi_mu":       "B_{c}#rightarrow J/#psi #mu#nu",
+    "jpsi_tau":      "B_{c}#rightarrow J/#psi #tau#nu",
+    "feeddown":      "B_{c}#rightarrow(#psi',#chi_{c},h_{c}) l#nu",
+    "jpsi_D":        "B_{c}#rightarrow J/#psi + D_{(s)}",
+    "bc_other":      "B_{c}#rightarrow J/#psi + hadrons",
+    "Hb":            "H_{b}#rightarrow J/#psi + X",
+    "combinatorial": "combinatorial (J/#psi sidebands)",
+    "misID":         "misID (data-driven)",
+    "Bc":            "B_{c}#rightarrow J/#psi X",
+}
+
+# fallback for any process not listed above (keeps the script robust if a new
+# template name shows up in the fit file).
+PALETTE = list(_P)
 # -----------------------------------------------------------------------------
 
 
@@ -128,7 +162,7 @@ def plot_channel(f, fitdir, label, channel, outpath):
         stack.Add(h)
         keep.append(h)
     for name, h in reversed(list(procs.items())):  # legend top entry = top of stack
-        leg.AddEntry(h, name, "f")
+        leg.AddEntry(h, PROC_LABEL.get(name, name), "f")
 
     drawband = has_band(htot)
     if drawband:

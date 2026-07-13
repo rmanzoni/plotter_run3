@@ -7,12 +7,15 @@ from .core import Sample, Process, Histogrammer, StackPlotter, run
 from . import style, binning, derived
 from .derived import (Derived, p4_ptetaphim, p4_ptetaphie, invariant_mass,
                       MASS_E, MASS_MU, MASS_PI, MASS_K, MASS_PROTON, MASS_JPSI,
-                      MASS_BPLUS)
+                      MASS_BPLUS, MASS_BC, PS_PER_CM,
+                      bin_index, equal_velocity_momentum, proper_time_ps,
+                      stitch_index)
 
 __all__ = [
     "Sample", "Process", "Histogrammer", "StackPlotter", "run",
     "style", "binning", "derived",
     "Derived", "p4_ptetaphim", "p4_ptetaphie", "invariant_mass",
     "MASS_E", "MASS_MU", "MASS_PI", "MASS_K", "MASS_PROTON", "MASS_JPSI",
-    "MASS_BPLUS",
+    "MASS_BPLUS", "MASS_BC", "PS_PER_CM",
+    "bin_index", "equal_velocity_momentum", "proper_time_ps", "stitch_index",
 ]

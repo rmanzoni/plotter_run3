@@ -12,7 +12,10 @@ gen_bc_decay convention (BcGenDecay / RJPsiGenHistory): 1..22 = real Bc channels
 """
 import numpy as np
 from collections import OrderedDict
-from cmsplot import Sample, Derived, p4_ptetaphim, invariant_mass, MASS_K, MASS_PI
+from cmsplot import (Sample, Derived, p4_ptetaphim, invariant_mass,
+                     MASS_K, MASS_PI, MASS_MU, MASS_BC,
+                     bin_index, equal_velocity_momentum, proper_time_ps,
+                     stitch_index)
 from cmsplot.style import PETROFF_10 as P
 
 # --- run conditions -----------------------------------------------------------
@@ -26,8 +29,8 @@ NTUPLE_DIR = "/Users/manzoni/Documents/rjpsi_run3/ntuples/15jun26"  # EDIT
 # --- global MC normalisations -------------------------------------------------
 # (2) Tune the absolute Bc and Hb yields here. lumi * sigma / N_gen, times any
 #     k-factor / data-driven scale you want. These set the Bc:Hb *ratio*.
-BC_SCALE = 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 1.2 * 0.015 * 0.4267616659357488 * 1.03605435648848
-HB_SCALE = 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 0.95 * 0.04  * 0.8141294120498126 * 0.5831798345092318 # applied to both hb1 and hb2 (each keeps its own below if needed)
+BC_SCALE = 1.373 * 1.185 * 1.51 * 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 1.2 * 0.015 * 0.4267616659357488 * 1.03605435648848
+HB_SCALE = 1.373 * 1.185 * 1.51 * 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 0.95 * 0.04  * 0.8141294120498126 * 0.5831798345092318 # applied to both hb1 and hb2 (each keeps its own below if needed)
 MISID_SCALE = 1.0        # DATA fail-region count enters UNSCALED; only FR(pt) weights it.
                          # (was 0.05: an arbitrary 20x suppression of the data term while the
                          #  MC-subtraction terms used the genuine BC/HB scales -> the fake-factor
@@ -98,6 +101,9 @@ BINNING = {
     # B+ -> J/psi K+ piles up at the B+ mass (5.279); everything else smears.
     "jpsi_k_mass": (50, 4.5, 7.0),
     "jpsi_pi_mass": (50, 4.5, 7.0),
+    # NB: the LHCb stitched-template branches (lhcb_decay_time / lhcb_Z /
+    # lhcb_3d_index) get their binning via BINNING.update(...) further down,
+    # once their edge arrays / sizes are defined (single source of truth).
 }
 
 # --- derived variables (computed on the fly from existing branches) ----------
@@ -127,12 +133,93 @@ def jpsi_had_mass(had_mass):
         return invariant_mass(jpsi + hadron)
     return Derived(func=_f, inputs=_JPSI_HAD_INPUTS)
 
+# =============================================================================
+# LHCb-style multidimensional (3D) stitched template  -------------------------
+#
+# Reproduces LHCb's R(J/psi) 3D fit in (m^2_miss, decay time, Z) -- where Z is a
+# binned 2D function of (q^2, E*_mu) -- by STITCHING the per-(t, Z)-cell m^2_miss
+# distributions into one long 1D super-template. Each event is assigned a global
+# bin index   g = (i_t * N_Z + i_Z) * N_m + i_m   (decay-time outermost, then Z,
+# then m^2_miss innermost); histogramming g with unit integer edges yields the
+# N_t x N_Z x N_m = stitched template the binned fit consumes.
+#
+# Variable choices (CMS, J/psi-direction reco; differ slightly from LHCb):
+#   * decay time t = M_Bc * jpsi_lxyz / (c * |p_Bc|), with the equal-velocity
+#     |p_Bc| = (M_Bc / m_vis) * |p_vis|, visible_p4 = jpsi_rfp4 + bachelor mu;
+#     this is bc_full_p4_jpsi.P() rebuilt from branches (no momentum branch is
+#     stored), so no ntuple change is needed.
+#   * Z = bin(q2_jpsi) x bin(mu_jpsi_e), mu_jpsi_e = E*_mu in the J/psi frame
+#     (better tau/mu separation than the Bc-frame energy);
+#   * m^2_miss = m_miss2_jpsi, kept on the existing (20, -10, 10) GeV^2 binning.
+# Out-of-grid events get NaN at the offending axis and are DROPPED (no overflow).
+# -----------------------------------------------------------------------------
+LHCB_T_EDGES     = [0.0, 0.2, 0.4, 0.8, 2.5]      # decay time [ps]   -> 5 bins
+LHCB_Q2_EDGES    = [0.0, 8.0, 10.12]                   # q2_jpsi  [GeV^2]  -> 2 bins
+LHCB_ESTAR_EDGES = [0.0, 0.5, 0.9, 1.3, 3.5]      # mu_jpsi_e [GeV]   -> 5 bins
+LHCB_MMISS2_NBINS = 20                                 # m_miss2_jpsi      -> 20 bins
+LHCB_MMISS2_RANGE = (-10.0, 10.0)                      # GeV^2 (matches the BINNING below)
+
+_LHCB_MMISS2_EDGES = np.linspace(LHCB_MMISS2_RANGE[0], LHCB_MMISS2_RANGE[1],
+                                 LHCB_MMISS2_NBINS + 1)
+N_T     = len(LHCB_T_EDGES) - 1                         # 5
+N_Q2    = len(LHCB_Q2_EDGES) - 1                        # 2
+N_ESTAR = len(LHCB_ESTAR_EDGES) - 1                     # 5
+N_Z     = N_Q2 * N_ESTAR                                # 10  (q^2 outer, E* inner)
+N_M     = LHCB_MMISS2_NBINS                             # 20
+N_STITCH = N_T * N_Z * N_M                              # 5 * 10 * 20 = 1000
+
+# binning for the stitched index (unit integer bins) and its 1D ingredients,
+# registered here so the numbers live in exactly one place (the edges above)
+BINNING.update({
+    "lhcb_decay_time": LHCB_T_EDGES,                    # variable-width [ps]
+    "lhcb_Z":          (N_Z, 0, N_Z),                   # integer Z bins 0..9
+    "lhcb_3d_index":   (N_STITCH, 0, N_STITCH),         # unit-width global bins
+})
+
+# decay-time inputs: jpsi 3D flight length + the pieces of the visible 4-vector
+_DT_INPUTS = ("jpsi_lxyz", "jpsi_rf_pt", "jpsi_rf_eta", "jpsi_rf_phi",
+              "jpsi_rf_mass", "mu3_pt", "mu3_eta", "mu3_phi")
+
+def _lhcb_decay_time(a):
+    visible = (p4_ptetaphim(a["jpsi_rf_pt"], a["jpsi_rf_eta"],
+                            a["jpsi_rf_phi"], a["jpsi_rf_mass"])
+               + p4_ptetaphim(a["mu3_pt"], a["mu3_eta"], a["mu3_phi"], MASS_MU))
+    p_bc = equal_velocity_momentum(visible, MASS_BC)    # = bc_full_p4_jpsi.P()
+    return proper_time_ps(a["jpsi_lxyz"], MASS_BC, p_bc)
+
+def _lhcb_Z(a):
+    # row-major over (q^2, E*): low-q^2 row = Z 0..4, high-q^2 row = Z 5..9
+    iq = bin_index(a["q2_jpsi"],   LHCB_Q2_EDGES)
+    ie = bin_index(a["mu_jpsi_e"], LHCB_ESTAR_EDGES)
+    return iq * N_ESTAR + ie
+
+def _lhcb_3d_index(a):
+    it = bin_index(a["lhcb_decay_time"], LHCB_T_EDGES)
+    iz = a["lhcb_Z"]                                     # already a 0..N_Z-1 index
+    im = bin_index(a["m_miss2_jpsi"], _LHCB_MMISS2_EDGES)
+    return stitch_index([it, iz, im], [N_T, N_Z, N_M])
+
+
 DERIVED = {
     "jpsi_k_mass":  jpsi_had_mass(MASS_K),
     "jpsi_pi_mass": jpsi_had_mass(MASS_PI),
     # add any hypothesis in one line, e.g.:
     # "jpsi_p_mass": jpsi_had_mass(MASS_PROTON),
+
+    # LHCb 3D stitched template. Declared in dependency order: decay time and Z
+    # are computed first, then the composite index reads them (compute_derived
+    # is a single ordered pass, so the two pieces must precede the index). Build
+    # the datacard with:  python3 plot.py --config samples_rjpsi.py \
+    #     --branches lhcb_3d_index lhcb_decay_time lhcb_Z m_miss2_jpsi \
+    #     --datacard-branches lhcb_3d_index
+    # then draw the stitched plot with postfit_tools/stitch_plot.py (below).
+    "lhcb_decay_time": Derived(func=_lhcb_decay_time, inputs=_DT_INPUTS),
+    "lhcb_Z":          Derived(func=_lhcb_Z, inputs=("q2_jpsi", "mu_jpsi_e")),
+    "lhcb_3d_index":   Derived(func=_lhcb_3d_index,
+                               inputs=("lhcb_decay_time", "lhcb_Z",
+                                       "m_miss2_jpsi")),
 }
+
 
 # --- axis-title overrides (issue 4) ------------------------------------------
 # cmsplot.binning.axis_label already turns branch names into LaTeX x-axis titles
@@ -142,6 +229,9 @@ DERIVED = {
 AXIS_TITLES = {
     "jpsi_k_mass": r"$m(J/\psi\,K^{+})$ [GeV]",
     "jpsi_pi_mass": r"$m(J/\psi\,\pi^{+})$ [GeV]",
+    "lhcb_decay_time": r"$t$ [ps]",
+    "lhcb_Z":          r"$Z(q^{2}_{J/\psi},\,E^{*}_{\mu})$ bin",
+    "lhcb_3d_index":   r"stitched $(t,\,Z,\,m^{2}_{\mathrm{miss}})$ bin",
 #     "q2_coll":     r"$q^{2}_{\mathrm{coll}}$ [GeV$^{2}$]",
 #     "m_miss2_jpsi": r"$m^{2}_{\mathrm{miss}}$ (J/$\psi$ dir.) [GeV$^{2}$]",
 }
@@ -239,7 +329,29 @@ JPSI_IN  = "(np.abs(jpsi_mass - 3.0969) < 0.1)"
 JPSI_OUT = "(np.abs(jpsi_mass - 3.0969) > 0.15)"
 
 
+# Strict signal gen-match: the OS pair is the J/psi (role 1) AND the bachelor is
+# the genuine signal muon (role 2). Applied to every (ccbar)+lep-nu mode so that
+# events where the wrong muon was picked up are NOT counted as signal.
 BC_GEN_MATCH = "(mu1_gen_role==1) & (mu2_gen_role==1) & (mu3_gen_role==2)"
+
+# J/psi + D_(s) cocktail modes (codes 13-20): the bachelor muon comes from the D
+# decay, so it is not the role-2 signal muon and the strict match above kills the
+# whole component. STOPGAP (no ntuple/inspector change yet): release the
+# bachelor-role requirement for these modes and match only the OS J/psi pair, so
+# B_c -> J/psi + D_(s) is restored in the plots and datacards.
+#   NOTE: this does NOT yet require the bachelor to originate from the D (that
+#   needs a dedicated gen role assigned in the inspector). Until then a fraction
+#   of the released jpsi_D events carry a fake/combinatorial bachelor; tighten
+#   to "bachelor from D" once the gen role exists, then drop this exemption.
+_JPSI_D_CODES = COMPONENTS["jpsi_D"][3]                      # [13, 14, ..., 20]
+_IS_JPSI_D = "(" + " | ".join("(gen_bc_decay==%d)" % c for c in _JPSI_D_CODES) + ")"
+
+# Per-mode cocktail gen-match used for the `bc` sample: always require the J/psi
+# pair (roles 1,1); require the role-2 bachelor for EVERY mode except jpsi_D,
+# where the bachelor-role requirement is released.
+BC_GEN_MATCH_COCKTAIL = (
+    "(mu1_gen_role==1) & (mu2_gen_role==1) & ((mu3_gen_role==2) | %s)" % _IS_JPSI_D
+)
 
 
 # common selection
@@ -319,7 +431,7 @@ samples = [
         datacard="Bc",                   # all gen_bc_decay components -> one Bc template
         scale=BC_SCALE,                  # lumi * sigma(Bc) / N_gen  (see top)
         weight_branches=[],              # e.g. ["puWeight", "ctau_weight_central"]
-        selection=f"({COMMON_SELECTION}) & ({KEEP_BC}) & ({JPSI_IN}) & ({BC_GEN_MATCH})" ,
+        selection=f"({COMMON_SELECTION}) & ({KEEP_BC}) & ({JPSI_IN}) & ({BC_GEN_MATCH_COCKTAIL})" ,
         split_by="gen_bc_decay",
         split_map=BC_SPLIT,
         split_default=BC_DEFAULT,

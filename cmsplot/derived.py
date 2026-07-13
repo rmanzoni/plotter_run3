@@ -40,6 +40,11 @@ MASS_K      = 0.493677       # charged kaon
 MASS_PROTON = 0.93827208
 MASS_JPSI   = 3.0969
 MASS_BPLUS  = 5.27934
+MASS_BC     = 6.27447       # PDG Bc+ mass [GeV] (matches RJPsiGenHistory.M_BC)
+
+# proper-time conversion: t[ps] = (m/p) * L[cm] * PS_PER_CM, with
+# PS_PER_CM = 1e12 / c[cm/s] = 1e12 / 2.99792458e10 ~ 33.3564 ps/cm.
+PS_PER_CM   = 1.0e12 / 2.99792458e10
 
 
 @dataclass
@@ -94,6 +99,74 @@ def invariant_mass(*p4s):
     px, py, pz, e = s[0], s[1], s[2], s[3]
     m2 = e * e - (px * px + py * py + pz * pz)
     return np.sqrt(np.clip(m2, 0.0, None))
+
+
+# --- binning / stitching helpers ---------------------------------------------
+# Used to build LHCb-style multi-dimensional *stitched* templates: each event is
+# placed into a 0-based bin index along each axis, the per-axis indices are then
+# folded into a single global bin index, and that global index is histogrammed
+# with unit-width integer edges -> one long 1D super-template whose blocks are
+# the 2D (decay-time x Z) cells, each holding an m^2_miss distribution.
+def bin_index(values, edges):
+    """Map ``values`` to a 0-based bin index for the given monotonic ``edges``.
+
+    Returns a float array: bin index in ``[0, len(edges)-2]`` for in-range
+    values, ``NaN`` for under/overflow (and for non-finite inputs). The top edge
+    is treated as belonging to the last bin (np.histogram convention), so this
+    matches how the engine later histograms the stitched index. NaN entries are
+    dropped downstream by ``_hist`` (i.e. NO over/underflow folding).
+    """
+    v = np.asarray(values, "float64")
+    edges = np.asarray(edges, "float64")
+    n = len(edges) - 1
+    out = np.digitize(v, edges, right=False).astype("float64") - 1.0
+    out[v == edges[-1]] = n - 1            # close the last bin on the right
+    bad = ~np.isfinite(v) | (out < 0) | (out >= n)
+    out[bad] = np.nan
+    return out
+
+
+def equal_velocity_momentum(visible_p4, m_parent):
+    """Equal-velocity ("rest-frame") parent momentum magnitude |p_parent|.
+
+    Given the visible-system four-vector ``visible_p4`` ((4, N) [px, py, pz, E])
+    and the parent mass ``m_parent``, returns ``|p_parent| = (m_parent / m_vis) *
+    |p_vis|`` -- the same construction the candidate uses for ``bc_full_p4_*``
+    (the flight direction only orients it; the magnitude is direction-free).
+    """
+    s = np.asarray(visible_p4, "float64")
+    px, py, pz = s[0], s[1], s[2]
+    p_vis = np.sqrt(px * px + py * py + pz * pz)
+    m_vis = invariant_mass(s)
+    good = m_vis > 0.0
+    return np.where(good, (m_parent / np.where(good, m_vis, 1.0)) * p_vis, np.nan)
+
+
+def proper_time_ps(length_cm, mass, momentum):
+    """Proper decay time [ps] = mass * L / (c * |p|) for L in cm, mass/|p| in GeV.
+
+    ``length_cm`` is the lab-frame flight length (cm), ``mass`` the parent mass
+    and ``momentum`` the parent momentum magnitude (both GeV). Non-positive
+    momenta yield NaN.
+    """
+    L = np.asarray(length_cm, "float64")
+    p = np.asarray(momentum, "float64")
+    return mass * L / np.where(p > 0.0, p, np.nan) * PS_PER_CM
+
+
+def stitch_index(indices, sizes):
+    """Fold per-axis 0-based bin indices into one global (row-major) bin index.
+
+    ``indices`` is an outer-to-inner list of 1D index arrays (e.g. [it, iZ, im]),
+    ``sizes`` the corresponding axis sizes ([N_t, N_Z, N_m]). Returns
+    ``(((i0)*N1 + i1)*N2 + i2 ...)`` as a float array; NaN in any axis (an
+    out-of-range event) propagates to NaN, so the event is dropped from the
+    histogram. The global template therefore has ``prod(sizes)`` bins.
+    """
+    g = np.asarray(indices[0], "float64")
+    for k in range(1, len(indices)):
+        g = g * sizes[k] + np.asarray(indices[k], "float64")
+    return g
 
 
 # --- engine-side helpers ------------------------------------------------------

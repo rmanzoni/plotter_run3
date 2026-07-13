@@ -11,6 +11,7 @@ Design for speed:
 from __future__ import annotations
 
 import os
+import re
 import glob as _glob
 import multiprocessing as _mp
 from dataclasses import dataclass, field
@@ -28,6 +29,28 @@ matplotlib.use("Agg")
 
 from . import style, binning
 from .derived import Derived, expand_inputs, compute_derived
+
+
+# Per-branch horizontal canvas scale for the 1D plots. Default width is 8 in;
+# a branch listed here gets its width multiplied by this factor (height kept).
+# e.g. the 10-bin Z variable reads better stretched out.
+BRANCH_WIDTH_SCALE = {
+    "lhcb_3d_index": 8.0,
+}
+
+BRANCH_HEIGHT_SCALE = {
+    "lhcb_3d_index": 2.0,
+}
+
+
+def _unit_from_label(lbl: str) -> str:
+    """Pull the trailing ``[unit]`` out of an axis label.
+
+    e.g. ``"$t$ [ps]" -> "ps"``, ``"$q^{2}$ [GeV$^{2}$]" -> "GeV$^{2}$"``;
+    returns ``""`` when the label carries no bracketed unit.
+    """
+    m = re.findall(r"\[([^\[\]]+)\]", lbl or "")
+    return m[-1].strip() if m else ""
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +478,10 @@ class StackPlotter:
 
         centers = 0.5 * (edges[:-1] + edges[1:])
         widths = np.diff(edges)
+        # variable-width binning -> plot a *density* (bin content / bin width) so
+        # the shape is not distorted by the wider bins; uniform binning unchanged.
+        variable_bins = bool(widths.size) and not np.allclose(widths, widths[0])
+        dens = (1.0 / widths) if variable_bins else np.ones_like(widths)
 
         sw, sw2 = {}, {}
         for p in present:
@@ -485,18 +512,20 @@ class StackPlotter:
             norm = 1.0 / tot.sum()
 
         have_data = data and data_sw.sum() > 0
+        wscale = BRANCH_WIDTH_SCALE.get(branch, 1.0)
+        hscale = BRANCH_HEIGHT_SCALE.get(branch, 1.0)
         if have_data:
             fig, (ax, rax) = plt.subplots(
-                2, 1, figsize=(8, 8), sharex=True,
+                2, 1, figsize=(8 * wscale, 8 * hscale), sharex=True,
                 gridspec_kw={"height_ratios": [3, 1], "hspace": 0.07})
         else:
-            fig, ax = plt.subplots(figsize=(8, 7))
+            fig, ax = plt.subplots(figsize=(8 * wscale, 7) * hscale)
             rax = None
 
         # --- stacked MC ---
         bottom = np.zeros_like(tot)
         for e in stack:
-            y = e["sw"] * norm
+            y = e["sw"] * norm * dens
             ax.bar(centers, y, width=widths, bottom=bottom, color=e["color"],
 #                    label=e["label"], align="center", linewidth=0.4,
 #                    edgecolor="black",
@@ -506,20 +535,26 @@ class StackPlotter:
             bottom = bottom + y
 
         # --- MC stat band ---
-        lo = (tot - tot_e) * norm
-        hi = (tot + tot_e) * norm
+        lo = (tot - tot_e) * norm * dens
+        hi = (tot + tot_e) * norm * dens
         self._band(ax, edges, lo, hi, facecolor="none", edgecolor="gray",
                    hatch="xxxxx", linewidth=0.0, label="MC stat. unc.")
 
         # --- data ---
         if have_data:
-            yd = data_sw * norm
-            yderr = np.sqrt(data_sw) * norm
+            yd = data_sw * norm * dens
+            yderr = np.sqrt(data_sw) * norm * dens
             m = data_sw > 0
             ax.errorbar(centers[m], yd[m], yerr=yderr[m], fmt="o", color="black",
                         markersize=4, label="Data", zorder=5)
 
-        ax.set_ylabel("a.u." if self.normalize else "Events")
+        if self.normalize:
+            ax.set_ylabel("a.u.")
+        elif variable_bins:
+            _u = _unit_from_label(binning.axis_label(branch))
+            ax.set_ylabel(("Events / %s" % _u) if _u else "Events / bin width")
+        else:
+            ax.set_ylabel("Events")
         ax.set_xlim(edges[0], edges[-1])
         ncol = 2 if len(stack) <= 8 else 3
         leg = ax.legend(ncol=ncol, fontsize="x-small", loc="upper right")
@@ -552,7 +587,8 @@ class StackPlotter:
         # it; if the measurement is unavailable we fall back to an estimate from
         # the number of legend rows. Both linear and log use the same target so
         # the gap looks consistent.
-        ymax = max(bottom.max(), (data_sw.max() * norm) if have_data else 0.0)
+        ymax = max(bottom.max(),
+                   ((data_sw * norm * dens).max()) if have_data else 0.0)
         n_handles = len(stack) + 1 + (1 if have_data else 0)   # +1 MC-stat band
         nrows = int(np.ceil(n_handles / max(1, ncol)))
         target = self._headroom_target(fig, ax, leg, nrows)
