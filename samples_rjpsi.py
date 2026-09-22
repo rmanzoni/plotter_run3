@@ -20,17 +20,27 @@ from cmsplot.style import PETROFF_10 as P
 
 # --- run conditions -----------------------------------------------------------
 COM = 13.6            # Run 2 MC = 13 TeV; switch to 13.6 for Run 3
-LUMI = None           # fb^-1 once you compare to data; None -> Simulation label
+# LUMI = None           # fb^-1 once you compare to data; None -> Simulation label
+LUMI = 308           # fb^-1 once you compare to data; None -> Simulation label
 EXTRA = "Preliminary"
 
-# NTUPLE_DIR = "/pnfs/psi.ch/cms/trivcat/store/user/manzoni/rjpsi_ntuples"  # EDIT
-NTUPLE_DIR = "/Users/manzoni/Documents/rjpsi_run3/ntuples/15jun26"  # EDIT
+NTUPLE_DIR = "/pnfs/psi.ch/cms/trivcat/store/user/manzoni/rjpsi_run3"  # EDIT
+# NTUPLE_DIR = "/Users/manzoni/Documents/rjpsi_run3/ntuples/15jun26"  # EDIT
 
 # --- global MC normalisations -------------------------------------------------
 # (2) Tune the absolute Bc and Hb yields here. lumi * sigma / N_gen, times any
 #     k-factor / data-driven scale you want. These set the Bc:Hb *ratio*.
-BC_SCALE = 1.373 * 1.185 * 1.51 * 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 1.2 * 0.015 * 0.4267616659357488 * 1.03605435648848
-HB_SCALE = 1.373 * 1.185 * 1.51 * 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 0.95 * 0.04  * 0.8141294120498126 * 0.5831798345092318 # applied to both hb1 and hb2 (each keeps its own below if needed)
+
+# partial luminosities https://twiki.cern.ch/twiki/bin/view/CMSPublic/LumiPublicResults#Summary_proton_proton_collisions
+lumi2022 = 38.01/308.
+lumi2023 = 30.10/308.
+lumi2024 = 112.70/308.
+lumi2025 = 114.85/308.
+lumi2026 = 30.36/308.
+
+
+BC_SCALE = 0.1 * 0.095872234 * (2.81 * 2.45 * 1.373 * 1.185 * 1.51 * 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 1.2 * 0.015 * 0.4267616659357488 * 1.03605435648848   )
+HB_SCALE = 0.1 * 0.095872234 * (2.81 * 2.45 * 1.373 * 1.185 * 1.51 * 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 0.95 * 0.04  * 0.8141294120498126 * 0.5831798345092318) # applied to both hb1 and hb2 (each keeps its own below if needed)
 MISID_SCALE = 1.0        # DATA fail-region count enters UNSCALED; only FR(pt) weights it.
                          # (was 0.05: an arbitrary 20x suppression of the data term while the
                          #  MC-subtraction terms used the genuine BC/HB scales -> the fake-factor
@@ -353,7 +363,6 @@ BC_GEN_MATCH_COCKTAIL = (
     "(mu1_gen_role==1) & (mu2_gen_role==1) & ((mu3_gen_role==2) | %s)" % _IS_JPSI_D
 )
 
-
 # common selection
 COMMON_SELECTION = " & ".join([
 #     "(np.abs(jpsi_mass - 3.0969) < 0.1)",
@@ -362,7 +371,9 @@ COMMON_SELECTION = " & ".join([
     "(jpsi_reliso_04 < 0.4)",
     "(mu_reliso_04 < 0.3)",
     "(mu1_pt > 4)",
-    "(mu2_pt > 3)",
+    #"(mu2_pt > 3)",
+    "(mu2_pt > 3.5)",
+    "(mu3_pt > 2.0)",
     "(jpsi_lxy_sig > 3)",
 #     "(mu3_id_tight > 0.5)",
     "(mu3_id_soft_mva > 0.5)",
@@ -373,8 +384,10 @@ COMMON_SELECTION = " & ".join([
     "(jpsi_lxy<0.3)",
     "(p4_par_jpsi>0)",
     "(lxyz_sig<18)",
-    "(mu_ip3d_jpsi_pv_sig>0)",
+#     "(mu_ip3d_jpsi_pv_sig>0)",
     "(np.abs(jpsi_k_mass-5.27)>0.1)",
+
+    "run<=357482", #2022C
 
     # extra handles to reduce bkg    
 #     "(nu1_jpsi_pz>0.)",
@@ -383,6 +396,14 @@ COMMON_SELECTION = " & ".join([
 #     "(cos_theta_l_nu2<0)",
 #     
 #     "(q2_coll>8)",
+
+#     "(nu1_mu_b_e_jpsi < 1.8)",
+#     "(nu2_mu_b_e_jpsi < 1.8)",
+
+#     "(mu_ip3d_jpsi_sv_sig > 0)",
+
+#     "(cos_theta_l_nu1<0)",
+#     "(cos_theta_l_nu2<0)",
     
 ])
 
@@ -420,14 +441,16 @@ COMMON_SELECTION_FAIL = COMMON_SELECTION.replace(_MU_ISO_PASS, _MU_ISO_FAIL)
 FR_PT_BRANCH = 'mu3_pt'
 FR_PT_EDGES  = [3, 4, 5, 6, 8, 10, 13, 17, np.inf]
 # FR_PT_VALUES = 0.15 * np.array([1.8397, 1.6658, 1.3692, 1.1056, 0.8944, 0.8107, 0.7505, 0.8603]) # with loose selection
-FR_PT_VALUES = 0.35 * np.array([0.6799, 0.7029, 0.5096, 0.6518, 0.4602, 0.6667, 0.5758, 2.3333]) # with the same selection as here
+FR_PT_VALUES = 0.01*0.35 * np.array([0.6799, 0.7029, 0.5096, 0.6518, 0.4602, 0.6667, 0.5758, 2.3333]) # with the same selection as here
+# FR_PT_VALUES = np.array([0.6799, 0.7029, 0.5096, 0.6518, 0.4602, 0.6667, 0.5758, 2.3333]) # with the same selection as here
 FR_TABLE = (FR_PT_BRANCH, FR_PT_EDGES, FR_PT_VALUES)
 # =============================================================================
 samples = [
     # --- dedicated Bc signal+cocktail MC --------------------------------------
     Sample(
         name="bc",
-        files=[f"{NTUPLE_DIR}/bc.root"],
+#         files=[f"{NTUPLE_DIR}/bc.root"],
+        files=[f"{NTUPLE_DIR}/bc_covflow_corrected.root"],
         datacard="Bc",                   # all gen_bc_decay components -> one Bc template
         scale=BC_SCALE,                  # lumi * sigma(Bc) / N_gen  (see top)
         weight_branches=[],              # e.g. ["puWeight", "ctau_weight_central"]
@@ -442,7 +465,8 @@ samples = [
     # same `group` so they stack into a single "Hb" entry. Give each its own
     # `scale` (lumi * sigma / N_gen) since the two productions normalise apart.
     Sample(
-        name="hb", files=[f"{NTUPLE_DIR}/hb.root"],
+#         name="hb", files=[f"{NTUPLE_DIR}/hb.root"],
+        name="hb", files=[f"{NTUPLE_DIR}/hb_covflow_corrected.root"],
         label=r"$H_b\!\to\! J/\psi + X$", color=P[5], group="hb",
         datacard="Hb",
         scale=HB_SCALE, 
@@ -453,8 +477,15 @@ samples = [
     # --- data -----------------------------------------------------------------
     Sample(
         name="data", 
-        files=[f"{NTUPLE_DIR}/data.root"], 
-        selection=f"({COMMON_SELECTION}) & ({JPSI_IN})" ,
+#         files=[f"{NTUPLE_DIR}/data_2024.root"], 
+        files=[
+            f"{NTUPLE_DIR}/data_2022.root",
+#             f"{NTUPLE_DIR}/data_2023.root",
+#             f"{NTUPLE_DIR}/data_2024.root",
+#             f"{NTUPLE_DIR}/data_2025.root",
+#             f"{NTUPLE_DIR}/data_2026.root",
+        ], 
+        selection=f"({COMMON_SELECTION}) & ({JPSI_IN}) & (in_golden_json>0.5)" ,
         is_data=True, datacard="data_obs"
     ),
 
@@ -477,11 +508,17 @@ samples = [
     # drawn as points. MC reads carry a NEGATIVE scale to subtract.
     Sample(
         name="misid_data",
-        files=[f"{NTUPLE_DIR}/data.root"],
+        files=[
+            f"{NTUPLE_DIR}/data_2022.root",
+            f"{NTUPLE_DIR}/data_2023.root",
+            f"{NTUPLE_DIR}/data_2024.root",
+            f"{NTUPLE_DIR}/data_2025.root",
+            f"{NTUPLE_DIR}/data_2026.root",
+        ], 
         label=r"misID (data-driven)", color=P[9], group="misid",
         datacard="misID",
         scale=MISID_SCALE,
-        selection=f"({COMMON_SELECTION_FAIL}) & ({JPSI_IN})",
+        selection=f"({COMMON_SELECTION_FAIL}) & ({JPSI_IN}) & (in_golden_json>0.5)",
         fakerate=FR_TABLE,
         # NOTE: is_data stays False on purpose (this is a stacked background,
         # built from data but not the measurement).
@@ -492,7 +529,7 @@ samples = [
         group="misid", datacard="misID",
         scale=-BC_SCALE,                 # subtract genuine Bc predicted in fail
         weight_branches=[],              # mirror the genuine `bc` sample's weights
-        selection=f"({COMMON_SELECTION_FAIL}) & ({KEEP_BC}) & ({JPSI_IN})",
+        selection=f"({COMMON_SELECTION_FAIL}) & ({KEEP_BC}) & ({JPSI_IN}) & ({BC_GEN_MATCH_COCKTAIL})",
         fakerate=FR_TABLE,
     ),
     Sample(
