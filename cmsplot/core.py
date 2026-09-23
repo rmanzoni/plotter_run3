@@ -57,6 +57,29 @@ def _unit_from_label(lbl: str) -> str:
 # Configuration model
 # ---------------------------------------------------------------------------
 @dataclass
+class WeightFactor:
+    """One multiplicative per-event weight factor, with optional variations.
+
+    inputs     : real branches the callables read (added to the column pruning).
+    nominal    : callable(arrays) -> per-event factor (np.ndarray). Enters the
+                 nominal weight, i.e. every plot, yield and datacard template.
+    variations : {nuisance: (up, down)}, each a callable(arrays) -> per-event
+                 factor that REPLACES ``nominal`` for that nuisance (all other
+                 factors stay nominal). The nuisance name is the Combine name,
+                 so two samples declaring the same nuisance are 100% correlated
+                 in the datacard (e.g. bc and the misID Bc subtraction).
+
+    The callables are the place to fail loud: they see the selected arrays and
+    must return finite factors or raise -- ``_hist`` silently drops events with
+    a non-finite weight, so a NaN leaking out of here would be an invisible
+    event loss. ``_make_processes`` re-checks finiteness as a backstop.
+    """
+    inputs: tuple
+    nominal: object
+    variations: dict = field(default_factory=dict)
+
+
+@dataclass
 class Sample:
     """One physical sample. May fan out into several plotted processes.
 
@@ -70,6 +93,9 @@ class Sample:
     color       : hex colour; auto-assigned from the Petroff palette if None.
     scale       : global normalisation (e.g. lumi * xsec / N_gen).
     weight_branches : per-event weight branches multiplied together.
+    weight_factors  : {name: WeightFactor} computed per-event factors (e.g.
+                  Hammer FF, Bc lifetime), multiplied into the nominal weight;
+                  their ``variations`` become shape nuisances in the datacards.
     selection   : numpy-evaluable string on the branches (trusted input).
     split_by    : branch whose integer code splits the sample into processes
                   (e.g. ``gen_bc_decay`` for the Bc cocktail).
@@ -91,6 +117,7 @@ class Sample:
     color: Optional[str] = None
     scale: float = 1.0
     weight_branches: list = field(default_factory=list)
+    weight_factors: dict = field(default_factory=dict)
     selection: str = ""
     split_by: Optional[str] = None
     split_map: dict = field(default_factory=dict)
@@ -127,6 +154,10 @@ class Process:
     datacard: str = ""    # Combine datacard process tag (inherited from Sample)
     sample_name: str = ""      # originating Sample.name (datacard-composition key)
     split_codes: tuple = ()    # gen codes folded into this component (split samples)
+    syst_weights: dict = field(default_factory=dict)
+    # {nuisance: (w_up, w_down)} full per-event weights (same length as
+    # ``weight``), built from Sample.weight_factors variations. Datacard-only:
+    # plots always use the nominal ``weight``.
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +204,8 @@ def _needed_columns(sample, needed_plot, derived=None):
     want = expand_inputs(needed_plot, derived) \
         | expand_inputs(_names_in_expr(sample.selection), derived) \
         | set(sample.weight_branches)
+    for wf in sample.weight_factors.values():
+        want |= set(wf.inputs)
     if sample.split_by:
         want.add(sample.split_by)
     if sample.fakerate:
@@ -180,66 +213,106 @@ def _needed_columns(sample, needed_plot, derived=None):
     return want
 
 
-def _read_sample(sample, needed_plot=None, max_events=-1,
-                 step_size="150 MB", to_float32=True, derived=None):
-    """Stream a sample's files, keeping only needed columns and selected rows.
+def _numeric_branches(path, tree):
+    import uproot
+    with uproot.open(path) as fh:
+        return [k for k, t in fh[tree].typenames().items()
+                if any(s in t for s in
+                       ("int", "float", "double", "bool", "short", "long"))]
 
-    Reads in chunks (uproot.iterate), applies the per-sample selection to each
-    chunk and retains only surviving rows, so peak memory is ~one chunk plus the
-    (usually small) selected subset -- not the whole input. Any configured
-    derived variables are computed on the surviving arrays before returning.
+
+def _read_file(path, tree, members, max_events=-1, step_size="150 MB",
+               to_float32=True, derived=None):
+    """ONE pass over one file, shared by every Sample that lists it.
+
+    ``members`` is ``[(sample, want)]`` with ``want`` the sample's column set
+    (None = all numeric). The file is decompressed once with the union of the
+    members' columns; each chunk is then masked with each member's selection
+    and every member keeps only its own surviving rows and its own columns.
+    This is what makes e.g. ``bc`` (pass-iso) and ``misid_bc_sub`` (fail-iso),
+    or ``data`` and ``misid_data``, cost one read of the ntuple instead of two.
+
+    Returns ``{sample.name: (list_of_survivor_chunks, rows_read)}``. With
+    ``max_events`` > 0 the file stops after that many rows (the per-sample cap
+    across files is applied when the files are stitched, see ``_assemble``).
     """
     import uproot
 
-    files = _expand(sample.files)
-    if not files:
-        return {}
-
-    # available numeric branches (from the first file), then prune to what we need
-    with uproot.open(files[0]) as fh:
-        tree = fh[sample.tree]
-        avail = [k for k, t in tree.typenames().items()
-                 if any(s in t for s in
-                        ("int", "float", "double", "bool", "short", "long"))]
-    want = _needed_columns(sample, needed_plot, derived)
-    read_list = avail if want is None else [b for b in avail if b in want]
+    avail = _numeric_branches(path, tree)
+    wants = [w for _, w in members]
+    union = None if any(w is None for w in wants) else set().union(*wants)
+    read_list = avail if union is None else [b for b in avail if b in union]
+    out = {smp.name: ([], 0) for smp, _ in members}
     if not read_list:
-        return {}
+        return out
 
-    paths = [f + ":" + sample.tree for f in files]
-    # Derived variables referenced in the SELECTION must exist before the
-    # per-chunk mask is evaluated, so compute those up front (per chunk). The
-    # remaining derived variables are computed once, after selection, on the
-    # (smaller) surviving arrays.
+    # derived variables used by ANY member's selection must exist before the
+    # masks are evaluated: compute them once per chunk, for all members
+    sel_names = {smp.name: _names_in_expr(smp.selection) for smp, _ in members}
     sel_derived = ({k: v for k, v in derived.items()
-                    if k in _names_in_expr(sample.selection)}
+                    if any(k in n for n in sel_names.values())}
                    if derived else {})
-    survivors, read_total = [], 0
-    for chunk in uproot.iterate(paths, expressions=read_list, library="np",
-                                step_size=step_size):
+    keep = {smp.name: (None if w is None
+                       else set(w) | (sel_names[smp.name] & set(sel_derived)))
+            for smp, w in members}
+
+    survivors = {smp.name: [] for smp, _ in members}
+    read_total = 0
+    for chunk in uproot.iterate(path + ":" + tree, expressions=read_list,
+                                library="np", step_size=step_size):
         chunk = {k: v for k, v in _to_dict(chunk).items()
                  if getattr(v, "ndim", 0) == 1 and v.dtype.kind in "biufc"}
         if not chunk:
             continue
         read_total += len(next(iter(chunk.values())))
-        if sel_derived:                       # make them available to selection
+        if sel_derived:
             compute_derived(chunk, sel_derived, to_float32=False)
-        mask = _selection_mask(chunk, sample.selection)
-        if mask.any():
-            survivors.append({
+        for smp, _ in members:
+            mask = _selection_mask(chunk, smp.selection)
+            if not mask.any():
+                continue
+            kp = keep[smp.name]
+            survivors[smp.name].append({
                 k: (v[mask].astype("float32")
                     if to_float32 and v.dtype == np.float64 else v[mask])
-                for k, v in chunk.items()})
+                for k, v in chunk.items() if kp is None or k in kp})
+        del chunk
         if 0 < max_events <= read_total:
             break
+    return {name: (chunks, read_total) for name, chunks in survivors.items()}
 
-    if not survivors:
+
+def _assemble(sample, per_file, max_events=-1, to_float32=True, derived=None):
+    """Stitch one sample's survivors across its files (in ``sample.files``
+    order, honouring ``max_events`` as a cap on rows READ), then add the
+    remaining derived columns. Chunk lists are consumed as they are merged so
+    the per-chunk copies and the merged arrays never coexist in full."""
+    chunks = []
+    read_total = 0
+    for f in _expand(sample.files):
+        c, n = per_file.get(f, ([], 0))
+        chunks.extend(c)
+        read_total += n
+        if 0 < max_events <= read_total:
+            break
+    if not chunks:
         return {}
-    keys = set(survivors[0])
-    out = {k: np.concatenate([s[k] for s in survivors]) for k in keys}
-    # add any remaining derived columns (skips ones already built above, and any
-    # whose inputs are absent in this sample)
+    out = {}
+    for k in list(chunks[0]):
+        out[k] = np.concatenate([c.pop(k) for c in chunks])
+    del chunks
     return compute_derived(out, derived, to_float32=to_float32)
+
+
+def _read_sample(sample, needed_plot=None, max_events=-1,
+                 step_size="150 MB", to_float32=True, derived=None):
+    """Single-sample reader (kept for API compatibility; Histogrammer.load
+    uses the shared per-file pass directly)."""
+    want = _needed_columns(sample, needed_plot, derived)
+    per_file = {f: _read_file(f, sample.tree, [(sample, want)], max_events,
+                              step_size, to_float32, derived)[sample.name]
+                for f in _expand(sample.files)}
+    return _assemble(sample, per_file, max_events, to_float32, derived)
 
 
 def _selection_mask(arrays, expr):
@@ -280,6 +353,61 @@ def _fakerate_lookup(pt, edges, values):
     return fr
 
 
+def _apply_weight_factors(sample, arrays, base, n):
+    """Fold Sample.weight_factors into ``base``; build the variation weights.
+
+    Returns ``(nominal, {nuisance: (w_up, w_down)})``. A variation weight is
+    ``base`` times every factor at its nominal value except the varied one,
+    multiplied in the SAME order as the nominal, so a variation that equals the
+    nominal factor on some events reproduces the nominal weight bit for bit
+    there (the datacard writer relies on this to skip no-effect templates).
+    """
+    if not sample.weight_factors:
+        return base, {}
+    if sample.is_data:
+        raise ValueError("sample %r: weight_factors on a data sample"
+                         % sample.name)
+    missing = sorted({b for wf in sample.weight_factors.values()
+                      for b in wf.inputs if b not in arrays})
+    if missing:
+        raise KeyError("sample %r: weight_factors need branch(es) %s that are "
+                       "not in the ntuple %s" % (sample.name, missing,
+                                                 sample.files))
+
+    def _eval(fn, what):
+        v = np.asarray(fn(arrays), dtype="float64")
+        if v.shape != (n,):
+            raise ValueError("sample %r: %s returned shape %s, expected (%d,)"
+                             % (sample.name, what, v.shape, n))
+        bad = ~np.isfinite(v)
+        if bad.any():
+            raise ValueError("sample %r: %s is non-finite for %d/%d events"
+                             % (sample.name, what, int(bad.sum()), n))
+        return v
+
+    names = list(sample.weight_factors)
+    nom = {k: _eval(sample.weight_factors[k].nominal, "factor %r" % k)
+           for k in names}
+
+    def _product(swap_key=None, swap_val=None):
+        w = np.asarray(base, dtype="float64")
+        for k in names:
+            w = w * (swap_val if k == swap_key else nom[k])
+        return w
+
+    weight = _product()
+    syst = {}
+    for k in names:
+        for nuis, (fup, fdn) in sample.weight_factors[k].variations.items():
+            if nuis in syst:
+                raise ValueError("sample %r: nuisance %r declared by two "
+                                 "weight factors" % (sample.name, nuis))
+            syst[nuis] = (
+                _product(k, _eval(fup, "factor %r, %sUp" % (k, nuis))),
+                _product(k, _eval(fdn, "factor %r, %sDown" % (k, nuis))))
+    return weight, syst
+
+
 def _make_processes(sample: Sample, arrays: dict, fallback_color=None):
     """Turn (already selection-filtered) arrays into Process objects (weight/split)."""
     if not arrays:
@@ -301,11 +429,14 @@ def _make_processes(sample: Sample, arrays: dict, fallback_color=None):
         ptb, fr_edges, fr_vals = sample.fakerate
         weight = weight * _fakerate_lookup(arrays.get(ptb), fr_edges, fr_vals)
 
+    weight, syst = _apply_weight_factors(sample, arrays, weight, n)
+
     if not sample.split_by or sample.split_by not in arrays:
         return [Process(sample.name, sample.label, sample.color or fallback_color,
                         sample.is_data, sample.is_signal, arrays, weight,
                         group=sample.group, is_fakerate=bool(sample.fakerate),
-                        datacard=sample.datacard, sample_name=sample.name)]
+                        datacard=sample.datacard, sample_name=sample.name,
+                        syst_weights=syst)]
 
     # integer codes, with non-finite (NaN) routed to the default component
     raw = arrays[sample.split_by].astype("float64")
@@ -335,7 +466,8 @@ def _make_processes(sample: Sample, arrays: dict, fallback_color=None):
             {k: v[m] for k, v in arrays.items()}, weight[m],
             group=sample.group, is_fakerate=bool(sample.fakerate),
             datacard=sample.datacard, sample_name=sample.name,
-            split_codes=tuple(sorted(codelist))))
+            split_codes=tuple(sorted(codelist)),
+            syst_weights={k: (u[m], d[m]) for k, (u, d) in syst.items()}))
     return procs
 
 
@@ -379,19 +511,46 @@ class Histogrammer:
         return set(self.needed_plot)
 
     def load(self):
-        raw = {}
         need = self._needed_set()
+        names = [s.name for s in self.samples]
+        if len(set(names)) != len(names):
+            raise ValueError("duplicate Sample names: %s"
+                             % sorted({n for n in names if names.count(n) > 1}))
+
+        # Invert sample -> files into (file, tree) -> samples, so every ntuple
+        # is decompressed ONCE however many Samples read it (bc + misid_bc_sub,
+        # hb + misid_hb_sub, data + misid_data, ...). Threads run over files.
+        from collections import OrderedDict
+        by_file = OrderedDict()
+        for s in self.samples:
+            want = _needed_columns(s, need, self.derived)
+            files = _expand(s.files)
+            dup = sorted({f for f in files if files.count(f) > 1})
+            if dup:
+                raise ValueError("sample %r lists file(s) more than once: %s"
+                                 % (s.name, dup))
+            for f in files:
+                by_file.setdefault((f, s.tree), []).append((s, want))
+
+        per_sample = {s.name: {} for s in self.samples}
         with ThreadPoolExecutor(max_workers=self.jobs) as ex:
-            futs = {ex.submit(_read_sample, s, need, self.max_events,
-                              self.step_size, self.to_float32, self.derived): s
-                    for s in self.samples}
-            for fut, s in futs.items():
-                raw[s.name] = fut.result()
+            futs = {ex.submit(_read_file, f, tree, members, self.max_events,
+                              self.step_size, self.to_float32, self.derived):
+                    (f, tree) for (f, tree), members in by_file.items()}
+            for fut, (f, tree) in futs.items():
+                for name, res in fut.result().items():
+                    per_sample[name][f] = res
 
         # assign fallback colours to non-data, non-split samples lacking one
         procs = []
         for s in self.samples:
-            procs += _make_processes(s, raw.get(s.name, {}))
+            # assemble one sample at a time and drop its raw arrays as soon as
+            # its Processes exist (split samples copy per component), so at
+            # most one sample is ever held twice
+            arrays = _assemble(s, per_sample.pop(s.name), self.max_events,
+                               self.to_float32, self.derived)
+            procs += _make_processes(s, arrays)
+            del arrays
         # colour any process still missing a colour (one colour per group/key)
         need, seen = [], set()
         for p in procs:
@@ -830,6 +989,12 @@ def _write_selection(samples, outdir, label, scale_to_data=False, overflow=False
                 print("  scale     = %g" % s.scale, file=f)
                 if s.weight_branches:
                     print("  weights   = %s" % " * ".join(s.weight_branches), file=f)
+                if s.weight_factors:
+                    print("  factors   = %s" % " * ".join(s.weight_factors), file=f)
+                    nuis = [nm for wf in s.weight_factors.values()
+                            for nm in wf.variations]
+                    if nuis:
+                        print("  shape nuisances = %s" % " ".join(nuis), file=f)
                 if s.group:
                     print("  group     = %s" % s.group, file=f)
             print("  selection = %s" % (s.selection if s.selection else "(none)"),

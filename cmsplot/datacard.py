@@ -27,7 +27,19 @@ fit is free to determine the normalisations:
     R(J/psi) directly if it is normalised to the mu BF);
   * each non-signal Bc contribution gets an independent ``lnN`` (default 10%);
   * the non-Bc backgrounds (Hb, misID) keep their own free ``rateParam``;
-  * ``autoMCStats`` covers bin-by-bin MC statistics.
+  * ``autoMCStats`` covers bin-by-bin MC statistics;
+  * every weight-factor variation carried by the Processes (Sample.
+    weight_factors -> Process.syst_weights, e.g. the 15 Hammer FF
+    eigen-directions and the Bc lifetime) becomes a ``shape`` nuisance with
+    ``<process>_<nuisance>{Up,Down}`` templates. A nuisance is attached to a
+    datacard process only if its Up or Down template differs from the nominal
+    one (a process whose events all have the factor at its nominal value -- e.g.
+    FF variations on bc_other -- would only add a no-op row). Processes feeding
+    the same datacard process are summed per variation, those that do not carry
+    the nuisance entering at their nominal weight, so a variation propagates
+    with its sign into composite templates (the Bc subtraction inside misID).
+    A declared nuisance with no effect on ANY process is an error: that is the
+    signature of variations silently equal to the nominal.
 
 In the collapsed/merged card (a single "Bc" template = signal) there is no
 second Bc process to tie, so ``bc_norm`` is omitted and the signal falls back to
@@ -249,13 +261,54 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
         # --- accumulate templates by datacard tag --------------------------
         sw = {t: np.zeros(len(edges) - 1) for t in tags}
         sw2 = {t: np.zeros(len(edges) - 1) for t in tags}
-        for p in present:
+        mc_present = [p for p in present
+                      if not p.is_data and etag(p) in tags]
+        nuisances = []                               # ordered, first-seen
+        for p in mc_present:
+            for nm in p.syst_weights:
+                if nm not in nuisances:
+                    nuisances.append(nm)
+        # var[nm][t] = [up_sw, up_sw2, dn_sw, dn_sw2]; carriers[nm] = tags fed
+        # by at least one process that carries the nuisance
+        var = {nm: {t: [np.zeros(len(edges) - 1) for _ in range(4)]
+                    for t in tags} for nm in nuisances}
+        carriers = {nm: set() for nm in nuisances}
+        for p in mc_present:
             t = etag(p)
-            if p.is_data or t not in tags:
-                continue
-            s, s2 = _hist(p.arrays[branch], p.weight, edges, overflow=overflow)
+            x = p.arrays[branch]
+            s, s2 = _hist(x, p.weight, edges, overflow=overflow)
             sw[t] += s
             sw2[t] += s2
+            for nm in nuisances:
+                acc = var[nm][t]
+                if nm in p.syst_weights:
+                    carriers[nm].add(t)
+                    wu, wd = p.syst_weights[nm]
+                    su, su2 = _hist(x, wu, edges, overflow=overflow)
+                    sd, sd2 = _hist(x, wd, edges, overflow=overflow)
+                else:                                # nominal contribution
+                    su, su2, sd, sd2 = s, s2, s, s2
+                acc[0] += su
+                acc[1] += su2
+                acc[2] += sd
+                acc[3] += sd2
+
+        # which (nuisance, tag) pairs actually move? compared BEFORE flooring,
+        # against the unfloored nominal (exact equality is meaningful: the
+        # variation weights reproduce the nominal bit for bit where the factor
+        # is at its nominal value, see core._apply_weight_factors)
+        active = {}
+        for nm in nuisances:
+            act = [t for t in tags if t in carriers[nm]
+                   and not (np.array_equal(var[nm][t][0], sw[t])
+                            and np.array_equal(var[nm][t][2], sw[t]))]
+            if not act:
+                raise ValueError(
+                    "shape nuisance %r has NO effect on any datacard process "
+                    "(carried by %s): its Up/Down weights equal the nominal. "
+                    "This is the signature of a broken variation, not a small "
+                    "uncertainty." % (nm, sorted(carriers[nm])))
+            active[nm] = act
 
         # floor non-positive expected yields (Combine requires >= 0)
         n_floored = {}
@@ -263,6 +316,11 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
             bad = sw[t] <= 0.0
             n_floored[t] = int(bad.sum())
             sw[t][bad] = floor
+        for nm in nuisances:
+            for t in active[nm]:
+                for i in (0, 2):
+                    v = var[nm][t][i]
+                    v[v <= 0.0] = floor
 
         # --- observation ---------------------------------------------------
         if obs_procs:
@@ -282,6 +340,12 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
         with uproot.recreate(root_path) as f:
             for t in tags:
                 f[t] = _to_th1(t, sw[t], sw2[t], edges)
+            for nm in nuisances:
+                for t in active[nm]:
+                    up, up2, dn, dn2 = var[nm][t]
+                    hu, hd = "%s_%sUp" % (t, nm), "%s_%sDown" % (t, nm)
+                    f[hu] = _to_th1(hu, up, up2, edges)
+                    f[hd] = _to_th1(hd, dn, dn2, edges)
             # data_obs: integer-ish counts; variance = counts
             f["data_obs"] = _to_th1("data_obs", d_sw, d_sw, edges)
 
@@ -290,16 +354,22 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
                     d_sw, signal, lo, hi, obs_is_asimov,
                     bc_tags=bc_tags, bc_norm_name=bc_norm_name,
                     bc_norm_range=bc_norm_range, bc_lnn=bc_lnn,
-                    bc_lnn_skip=bc_lnn_skip)
+                    bc_lnn_skip=bc_lnn_skip,
+                    shape_systs=[(nm, active[nm]) for nm in nuisances])
         n_ok += 1
 
         if verbose:
             fl = ", ".join("%s:%d" % (t, n_floored[t]) for t in tags
                            if n_floored[t])
-            print("  datacard %-22s -> %s.{root,txt}  obs=%d%s%s"
+            print("  datacard %-22s -> %s.{root,txt}  obs=%d%s%s%s"
                   % (branch, branch, int(round(d_sw.sum())),
                      " (Asimov)" if obs_is_asimov else "",
-                     ("  floored[" + fl + "]") if fl else ""))
+                     ("  floored[" + fl + "]") if fl else "",
+                     ("  shape nuisances: %d" % len(nuisances))
+                     if nuisances else ""))
+            if nuisances and n_ok == 1:          # per-process map, once
+                for nm in nuisances:
+                    print("      %-12s shape on %s" % (nm, ", ".join(active[nm])))
       except Exception as e:
         # never let one bad branch abort the loop and leave LATER branches'
         # datacards stale on disk (a silent plot/datacard mismatch). Remove any
@@ -323,7 +393,8 @@ def write_datacards(procs, hg, branches, outdir, label, nbins=40,
 
 def _write_card(path, channel, tags, sw, d_sw, signal, lo, hi, asimov,
                 bc_tags=(), bc_norm_name="bc_norm", bc_norm_range=(0.0, 10.0),
-                bc_lnn=0.10, bc_lnn_skip=()):
+                bc_lnn=0.10, bc_lnn_skip=(), shape_systs=()):
+    """``shape_systs`` is an ordered list of (nuisance, [datacard processes])."""
     nbkg = len(tags) - 1
     procid = {t: (0 if t == signal else i)
               for i, t in enumerate([signal] + [t for t in tags if t != signal])}
@@ -343,7 +414,7 @@ def _write_card(path, channel, tags, sw, d_sw, signal, lo, hi, asimov,
     # must in turn exceed the widest data cell, otherwise %*s right-justifies
     # with zero leading space and adjacent cells run together -- e.g. three
     # "m_miss2_jpsi" bin cells printing as one unparseable blob.
-    syst_names = [t + "_norm_unc" for t in lnn_tags]
+    syst_names = [t + "_norm_unc" for t in lnn_tags] + [nm for nm, _ in shape_systs]
     namew = max([len(x) for x in
                  (["observation", "process", "rate", "bin"]
                   + list(tags) + syst_names)])
@@ -411,6 +482,13 @@ def _write_card(path, channel, tags, sw, d_sw, signal, lo, hi, asimov,
         for t in lnn_tags:
             cells = [kappa if u == t else "-" for u in tags]
             lines.append(syst_row(t + "_norm_unc", "lnN", cells))
+
+    # (4) weight-factor variations (Hammer FF eigen-directions, Bc lifetime,
+    #     ...): one shape nuisance each, on the processes it actually moves.
+    for nm, act in shape_systs:
+        act = set(act)
+        cells = ["1" if u in act else "-" for u in tags]
+        lines.append(syst_row(nm, "shape", cells))
 
     lines.append("* autoMCStats 0")
     lines.append("")

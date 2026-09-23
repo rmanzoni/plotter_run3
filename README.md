@@ -54,6 +54,17 @@ The two MC sources tile the J/ψ-from-b phase space without overlap:
 - Hb sample keeps `EXCLUDE_BC = "(gen_bc_decay==0)|(gen_bc_decay!=gen_bc_decay)"`
   (i.e. code 0 or NaN), so every Bc event is removed from Hb.
 
+### Computed weights and shape systematics
+`weight_factors={name: WeightFactor(inputs, nominal, variations)}` multiplies
+computed per-event factors into the nominal weight (plots, yields, templates).
+Each `variations` entry `{nuisance: (up, down)}` replaces that factor's nominal
+and becomes a Combine `shape` nuisance with `<process>_<nuisance>{Up,Down}`
+templates, attached only to the datacard processes it actually moves. Samples
+declaring the same nuisance name are fully correlated (e.g. `bc` and the Bc
+subtraction inside misID). The callables must return finite factors or raise.
+In `samples_rjpsi.py`, `BC_WEIGHT_FACTORS` = Hammer FF (`ff_ev00..14`) x Bc
+lifetime (`bc_ctau`).
+
 ### Cross-sample grouping
 `group="hb"` on both `hb1` and `hb2` sums them into a single stacked "Hb" entry
 (and one line in `yields.txt`), while each keeps its own `scale`.

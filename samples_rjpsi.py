@@ -12,7 +12,7 @@ gen_bc_decay convention (BcGenDecay / RJPsiGenHistory): 1..22 = real Bc channels
 """
 import numpy as np
 from collections import OrderedDict
-from cmsplot import (Sample, Derived, p4_ptetaphim, invariant_mass,
+from cmsplot import (Sample, WeightFactor, Derived, p4_ptetaphim, invariant_mass,
                      MASS_K, MASS_PI, MASS_MU, MASS_BC,
                      bin_index, equal_velocity_momentum, proper_time_ps,
                      stitch_index)
@@ -25,6 +25,14 @@ LUMI = 308           # fb^-1 once you compare to data; None -> Simulation label
 EXTRA = "Preliminary"
 
 NTUPLE_DIR = "/pnfs/psi.ch/cms/trivcat/store/user/manzoni/rjpsi_run3"  # EDIT
+
+# MC ntuples: covflow-corrected (the nominal branch names carry the corrected
+# quantities, the uncorrected ones live in *_raw twins), the Bc one with the
+# Hammer FF weights and the Bc lifetime weights added. Used by the genuine MC
+# samples AND by the MC subtraction inside the data-driven misID, so the two
+# stay in lockstep. Data is untouched by covflow.
+BC_FILE = f"{NTUPLE_DIR}/bc_hammer_ctau_covflow.root"
+HB_FILE = f"{NTUPLE_DIR}/hb_covflow.root"
 # NTUPLE_DIR = "/Users/manzoni/Documents/rjpsi_run3/ntuples/15jun26"  # EDIT
 
 # --- global MC normalisations -------------------------------------------------
@@ -39,8 +47,8 @@ lumi2025 = 114.85/308.
 lumi2026 = 30.36/308.
 
 
-BC_SCALE = 0.1 * 0.095872234 * (2.81 * 2.45 * 1.373 * 1.185 * 1.51 * 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 1.2 * 0.015 * 0.4267616659357488 * 1.03605435648848   )
-HB_SCALE = 0.1 * 0.095872234 * (2.81 * 2.45 * 1.373 * 1.185 * 1.51 * 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 0.95 * 0.04  * 0.8141294120498126 * 0.5831798345092318) # applied to both hb1 and hb2 (each keeps its own below if needed)
+BC_SCALE =  1.5 * (2.81 * 2.45 * 1.373 * 1.185 * 1.51 * 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 1.2 * 0.015 * 0.4267616659357488 * 1.03605435648848   )
+HB_SCALE =  1.2 * 1.6 * (2.81 * 2.45 * 1.373 * 1.185 * 1.51 * 1.54 * 1.3839001 * 1.44 * 1.19 * 1.18 * 0.95 * 0.04  * 0.8141294120498126 * 0.5831798345092318) # applied to both hb1 and hb2 (each keeps its own below if needed)
 MISID_SCALE = 1.0        # DATA fail-region count enters UNSCALED; only FR(pt) weights it.
                          # (was 0.05: an arbitrary 20x suppression of the data term while the
                          #  MC-subtraction terms used the genuine BC/HB scales -> the fake-factor
@@ -387,7 +395,10 @@ COMMON_SELECTION = " & ".join([
 #     "(mu_ip3d_jpsi_pv_sig>0)",
     "(np.abs(jpsi_k_mass-5.27)>0.1)",
 
-    "run<=357482", #2022C
+#     "(run<=357482)", #2022C -- parentheses REQUIRED: `&` binds tighter than
+                     # `<=`, so a bare `... & run<=357482` evaluates as
+                     # `(... & run) <= 357482`, i.e. True for EVERY event, and
+                     # the whole COMMON_SELECTION silently becomes a no-op.
 
     # extra handles to reduce bkg    
 #     "(nu1_jpsi_pz>0.)",
@@ -441,19 +452,130 @@ COMMON_SELECTION_FAIL = COMMON_SELECTION.replace(_MU_ISO_PASS, _MU_ISO_FAIL)
 FR_PT_BRANCH = 'mu3_pt'
 FR_PT_EDGES  = [3, 4, 5, 6, 8, 10, 13, 17, np.inf]
 # FR_PT_VALUES = 0.15 * np.array([1.8397, 1.6658, 1.3692, 1.1056, 0.8944, 0.8107, 0.7505, 0.8603]) # with loose selection
-FR_PT_VALUES = 0.01*0.35 * np.array([0.6799, 0.7029, 0.5096, 0.6518, 0.4602, 0.6667, 0.5758, 2.3333]) # with the same selection as here
+FR_PT_VALUES =  0.4 * np.array([0.6799, 0.7029, 0.5096, 0.6518, 0.4602, 0.6667, 0.5758, 2.3333]) # with the same selection as here
 # FR_PT_VALUES = np.array([0.6799, 0.7029, 0.5096, 0.6518, 0.4602, 0.6667, 0.5758, 2.3333]) # with the same selection as here
 FR_TABLE = (FR_PT_BRANCH, FR_PT_EDGES, FR_PT_VALUES)
+# =============================================================================
+# Bc per-event weights: Hammer form factors (Kiselev -> Harrison-2024 BGLVar)
+# and Bc lifetime (0.507 -> PDG 0.510 ps). Both are applied to every read of
+# the Bc ntuple -- the genuine `bc` sample AND its misID subtraction -- and
+# their variations become shape nuisances in the datacards, correlated between
+# the two reads because they share the nuisance names.
+#
+# Branch schema: Bmmm/Analysis/python/HammerFF.py (hammer_*) and
+# JpsiChargedBranches.py (gen_bc_ctau_weight*). Hb gets neither: the Bc events
+# are removed from it by EXCLUDE_BC.
+#
+# The weights shift yields as well as shapes (FF rate change + acceptance). For
+# now that is accepted as is; the plan is to factor the pure yield change out
+# with per-channel <w> measured on the UNFILTERED sample.
+# =============================================================================
+HAMMER_N_EV = 15                               # BctoJpsiBGLVar eigen-directions
+HAMMER_SIGNAL_CODES = (1, 7)                   # gen_bc_decay: J/psi mu nu, J/psi tau nu
+# hammer_status codes, HammerFF.py: STATUS_OK, _NOT_SIGNAL, _NO_LEAVES,
+# _DECLINED, _NONFINITE = range(5)
+HAM_OK, HAM_NOT_SIGNAL, HAM_NO_LEAVES, HAM_DECLINED, HAM_NONFINITE = range(5)
+# Signal events whose Hammer weight came out non-finite (status 4, ~per mille)
+# get this flat weight, for the nominal AND every FF variation (i.e. they carry
+# no FF shape uncertainty). >>> PLACEHOLDER: ~<w_nominal>; replace with the
+# value measured on the unfiltered sample -- or drop once status 4 is fixed at
+# the origin (see the open-items note).
+HAMMER_NONFINITE_FALLBACK = 0.49
+
+_HAMMER_VAR_BRANCHES = tuple("hammer_ff_ev%02d_%s" % (j, d)
+                             for j in range(HAMMER_N_EV) for d in ("up", "dn"))
+
+
+def _hammer_factor(branch, report=False):
+    """Per-event Hammer factor from ``branch`` (nominal or one variation).
+
+    status 0 (OK)          -> the weight, which must be finite;
+    status 1 (NOT_SIGNAL)  -> 1  (every mode but J/psi mu nu / J/psi tau nu);
+    status 4 (NONFINITE)   -> HAMMER_NONFINITE_FALLBACK;
+    status 2/3, or a status inconsistent with gen_bc_decay -> hard error.
+    """
+    def _f(a):
+        st = np.asarray(a["hammer_status"], "float64")
+        code = np.asarray(a["gen_bc_decay"], "float64")
+        w = np.asarray(a[branch], "float64")
+        if not np.all(np.isfinite(st)):
+            raise ValueError("hammer_status is NaN for %d events"
+                             % int((~np.isfinite(st)).sum()))
+        st = np.round(st).astype("int64")
+        is_sig = np.isin(code, HAMMER_SIGNAL_CODES)          # NaN -> False
+        incons = (is_sig & (st == HAM_NOT_SIGNAL)) | (~is_sig & (st != HAM_NOT_SIGNAL))
+        if incons.any():
+            raise ValueError("hammer_status inconsistent with gen_bc_decay for "
+                             "%d events" % int(incons.sum()))
+        known = (HAM_OK, HAM_NOT_SIGNAL, HAM_NONFINITE)
+        unhandled = ~np.isin(st, known)
+        if unhandled.any():
+            vals, cnt = np.unique(st[unhandled], return_counts=True)
+            raise ValueError("hammer_status without a weight policy: %s "
+                             "(2 = missing gen leaves, 3 = declined by Hammer)"
+                             % dict(zip(vals.tolist(), cnt.tolist())))
+        ok = st == HAM_OK
+        if not np.all(np.isfinite(w[ok])):
+            raise ValueError("%s non-finite for %d status-OK events" % (
+                branch, int((~np.isfinite(w[ok])).sum())))
+        out = np.ones(w.shape, "float64")
+        out[ok] = w[ok]
+        nonfin = st == HAM_NONFINITE
+        out[nonfin] = HAMMER_NONFINITE_FALLBACK
+        if report:
+            nsig = int(is_sig.sum())
+            print("  [hammer] %d signal events, %d status-4 -> w = %.3f "
+                  "(%.2f permille); <%s>_OK = %.4f"
+                  % (nsig, int(nonfin.sum()), HAMMER_NONFINITE_FALLBACK,
+                     1e3 * nonfin.sum() / max(nsig, 1), branch,
+                     float(w[ok].mean()) if ok.any() else float("nan")))
+        return out
+    return _f
+
+
+def _ctau_factor(branch):
+    """Bc lifetime factor. NaN means a gen Bc with an unusable decay length
+    (see bc_ctau_weight in JpsiChargedBranches.py): a broken gen record, never
+    silently weighted 1."""
+    def _f(a):
+        w = np.asarray(a[branch], "float64")
+        bad = ~np.isfinite(w)
+        if bad.any():
+            raise ValueError("%s non-finite for %d of %d selected Bc events"
+                             % (branch, int(bad.sum()), w.size))
+        return w
+    return _f
+
+
+BC_WEIGHT_FACTORS = OrderedDict([
+    ("hammer_ff", WeightFactor(
+        inputs=("hammer_weight", "hammer_status", "gen_bc_decay")
+               + _HAMMER_VAR_BRANCHES,
+        nominal=_hammer_factor("hammer_weight", report=True),
+        variations=OrderedDict(
+            ("ff_ev%02d" % j, (_hammer_factor("hammer_ff_ev%02d_up" % j),
+                               _hammer_factor("hammer_ff_ev%02d_dn" % j)))
+            for j in range(HAMMER_N_EV)),
+    )),
+    ("bc_ctau", WeightFactor(
+        inputs=("gen_bc_ctau_weight", "gen_bc_ctau_weight_up",
+                "gen_bc_ctau_weight_down"),
+        nominal=_ctau_factor("gen_bc_ctau_weight"),
+        variations={"bc_ctau": (_ctau_factor("gen_bc_ctau_weight_up"),
+                                _ctau_factor("gen_bc_ctau_weight_down"))},
+    )),
+])
+
 # =============================================================================
 samples = [
     # --- dedicated Bc signal+cocktail MC --------------------------------------
     Sample(
         name="bc",
-#         files=[f"{NTUPLE_DIR}/bc.root"],
-        files=[f"{NTUPLE_DIR}/bc_covflow_corrected.root"],
+        files=[BC_FILE],
         datacard="Bc",                   # all gen_bc_decay components -> one Bc template
         scale=BC_SCALE,                  # lumi * sigma(Bc) / N_gen  (see top)
-        weight_branches=[],              # e.g. ["puWeight", "ctau_weight_central"]
+        weight_branches=[],              # e.g. ["puWeight"]
+        weight_factors=BC_WEIGHT_FACTORS,  # Hammer FF x Bc ctau (+ variations)
         selection=f"({COMMON_SELECTION}) & ({KEEP_BC}) & ({JPSI_IN}) & ({BC_GEN_MATCH_COCKTAIL})" ,
         split_by="gen_bc_decay",
         split_map=BC_SPLIT,
@@ -465,8 +587,7 @@ samples = [
     # same `group` so they stack into a single "Hb" entry. Give each its own
     # `scale` (lumi * sigma / N_gen) since the two productions normalise apart.
     Sample(
-#         name="hb", files=[f"{NTUPLE_DIR}/hb.root"],
-        name="hb", files=[f"{NTUPLE_DIR}/hb_covflow_corrected.root"],
+        name="hb", files=[HB_FILE],
         label=r"$H_b\!\to\! J/\psi + X$", color=P[5], group="hb",
         datacard="Hb",
         scale=HB_SCALE, 
@@ -480,10 +601,10 @@ samples = [
 #         files=[f"{NTUPLE_DIR}/data_2024.root"], 
         files=[
             f"{NTUPLE_DIR}/data_2022.root",
-#             f"{NTUPLE_DIR}/data_2023.root",
-#             f"{NTUPLE_DIR}/data_2024.root",
-#             f"{NTUPLE_DIR}/data_2025.root",
-#             f"{NTUPLE_DIR}/data_2026.root",
+            f"{NTUPLE_DIR}/data_2023.root",
+            f"{NTUPLE_DIR}/data_2024.root",
+            f"{NTUPLE_DIR}/data_2025.root",
+            f"{NTUPLE_DIR}/data_2026.root",
         ], 
         selection=f"({COMMON_SELECTION}) & ({JPSI_IN}) & (in_golden_json>0.5)" ,
         is_data=True, datacard="data_obs"
@@ -525,16 +646,17 @@ samples = [
     ),
     Sample(
         name="misid_bc_sub",
-        files=[f"{NTUPLE_DIR}/bc.root"],
+        files=[BC_FILE],
         group="misid", datacard="misID",
         scale=-BC_SCALE,                 # subtract genuine Bc predicted in fail
         weight_branches=[],              # mirror the genuine `bc` sample's weights
+        weight_factors=BC_WEIGHT_FACTORS,  # same factors + nuisances as `bc`
         selection=f"({COMMON_SELECTION_FAIL}) & ({KEEP_BC}) & ({JPSI_IN}) & ({BC_GEN_MATCH_COCKTAIL})",
         fakerate=FR_TABLE,
     ),
     Sample(
         name="misid_hb_sub",
-        files=[f"{NTUPLE_DIR}/hb.root"],
+        files=[HB_FILE],
         group="misid", datacard="misID",
         scale=-HB_SCALE,                 # subtract genuine Hb predicted in fail
         weight_branches=[],              # mirror the genuine `hb` sample's weights
