@@ -73,10 +73,24 @@ class WeightFactor:
     must return finite factors or raise -- ``_hist`` silently drops events with
     a non-finite weight, so a NaN leaking out of here would be an invisible
     event loss. ``_make_processes`` re-checks finiteness as a backstop.
+
+    nominal_inputs : optional subset of ``inputs`` that ``nominal`` alone
+                 needs. When no datacard is requested the variations are not
+                 evaluated (see _apply_weight_factors), so only these branches
+                 are read -- e.g. the 30 Hammer up/down branches stay on disk.
+                 None (default): always read ``inputs``.
     """
     inputs: tuple
     nominal: object
     variations: dict = field(default_factory=dict)
+    nominal_inputs: Optional[tuple] = None
+
+    def needed(self, build_syst=True):
+        """Branches to read: all ``inputs``, or ``nominal_inputs`` when the
+        variations will not be evaluated and the subset was declared."""
+        if build_syst or self.nominal_inputs is None:
+            return tuple(self.inputs)
+        return tuple(self.nominal_inputs)
 
 
 @dataclass
@@ -192,7 +206,7 @@ def _names_in_expr(expr):
             if isinstance(n, ast.Name)} - {"np"}
 
 
-def _needed_columns(sample, needed_plot, derived=None):
+def _needed_columns(sample, needed_plot, derived=None, build_syst=True):
     """Columns we must read for this sample, or None to read all numeric ones.
 
     ``needed_plot`` may contain derived-variable names; those are resolved to the
@@ -205,7 +219,7 @@ def _needed_columns(sample, needed_plot, derived=None):
         | expand_inputs(_names_in_expr(sample.selection), derived) \
         | set(sample.weight_branches)
     for wf in sample.weight_factors.values():
-        want |= set(wf.inputs)
+        want |= set(wf.needed(build_syst))
     if sample.split_by:
         want.add(sample.split_by)
     if sample.fakerate:
@@ -213,12 +227,117 @@ def _needed_columns(sample, needed_plot, derived=None):
     return want
 
 
-def _numeric_branches(path, tree):
+_NUMERIC_TYPE_WORDS = ("int", "float", "double", "bool", "short", "long")
+
+_INT_SOURCE = None
+
+
+def _int_offset_fsspec_source():
+    """uproot's fsspec Source, with every byte offset cast to a Python int.
+
+    uproot hands the Source numpy integers (basket seeks come straight from
+    fBasketSeek); fsspec-xrootd forwards them unchanged to the XRootD python
+    bindings, and XRootD 6 rejects anything that is not a Python int
+    ("TypeError: integer argument expected for offset"). Casting here, at the
+    single entry point for all reads, keeps everything downstream int.
+    Local files never go through this (plain paths keep uproot's defaults).
+    """
+    global _INT_SOURCE
+    if _INT_SOURCE is None:
+        import uproot.source.fsspec as _fs
+
+        class IntOffsetFSSpecSource(_fs.FSSpecSource):
+            def chunk(self, start, stop):
+                return super().chunk(int(start), int(stop))
+
+            def chunks(self, ranges, notifications):
+                return super().chunks([(int(a), int(b)) for a, b in ranges],
+                                      notifications)
+
+        _INT_SOURCE = IntOffsetFSSpecSource
+    return _INT_SOURCE
+
+
+def _open_options(path):
+    """uproot.open / uproot.iterate options for ``path``."""
+    if path.startswith("root://"):
+        return {"handler": _int_offset_fsspec_source()}
+    return {}
+
+
+def _is_flat_scalar(branch):
+    """True for a branch uproot reads as a flat 1D numeric numpy array.
+
+    Jagged (``std::vector<T>``, ``T[n]``) and fixed-size array branches match
+    the numeric typename test too, but ``_read_file`` drops them after the read
+    (``ndim != 1`` / object dtype) -- so decompressing them was pure waste,
+    and for jagged branches the dominant per-entry cost of the whole read.
+    """
     import uproot
-    with uproot.open(path) as fh:
-        return [k for k, t in fh[tree].typenames().items()
-                if any(s in t for s in
-                       ("int", "float", "double", "bool", "short", "long"))]
+    try:
+        interp = branch.interpretation
+    except Exception:            # UnknownInterpretation & co: never readable
+        return False
+    return (isinstance(interp, uproot.interpretation.numerical.AsDtype)
+            and interp.to_dtype.shape == ()
+            and interp.to_dtype.kind in "biuf")
+
+
+_NONSCALAR_WARNED = set()
+
+
+def _numeric_branches(path, tree):
+    """Flat numeric branches of ``tree`` in ``path``: the typename filter this
+    reader always used, AND a flat-scalar interpretation (see _is_flat_scalar).
+    Exactly the set that used to survive the post-read filter in _read_file,
+    so the plotted branches are unchanged.
+
+    Numeric branches that are NOT flat scalars (vectors, fixed-size arrays)
+    are never read; they are listed once per file so that introducing one
+    is visible instead of silently unplotted. With all-scalar ntuples this
+    prints nothing and drops nothing.
+    """
+    import uproot
+    with uproot.open(path, **_open_options(path)) as fh:
+        t = fh[tree]
+        numeric = [k for k, tn in t.typenames().items()
+                   if any(w in tn for w in _NUMERIC_TYPE_WORDS)]
+        flat = [k for k in numeric if _is_flat_scalar(t[k])]
+    skipped = sorted(set(numeric) - set(flat))
+    if skipped and (path, tree) not in _NONSCALAR_WARNED:
+        _NONSCALAR_WARNED.add((path, tree))
+        print("  ! %s: %d non-scalar numeric branch(es) not read (cmsplot "
+              "plots flat 1D columns only): %s"
+              % (os.path.basename(path), len(skipped), ", ".join(skipped)))
+    return flat
+
+
+def plottable_branches(samples, derived=None, exclude=()):
+    """Names ``run(branches=None)`` would plot, WITHOUT reading any data.
+
+    Same answer as ``Histogrammer.branches()`` after a full load: the union
+    over every sample's files of the flat numeric branches, plus each derived
+    variable whose declared inputs a sample provides (evaluated in ``derived``
+    order, as ``compute_derived`` does, so chained derived variables resolve).
+    Used by the Slurm submitter to split the branch list into jobs on the UI.
+    Differences from a full load, both harmless (the branch plots nothing):
+    a sample whose selection keeps zero events still contributes its branches,
+    and a derived variable whose func raises at run time is still listed.
+    """
+    names = set()
+    for s in samples:
+        flat = set()
+        for f in _expand(s.files):
+            flat |= set(_numeric_branches(f, s.tree))
+        have = set(flat)
+        for name, spec in (derived or {}).items():
+            if name in have:
+                continue
+            inputs = getattr(spec, "inputs", ()) or ()
+            if all(b in have for b in inputs):
+                have.add(name)
+        names |= have
+    return sorted(n for n in names if n not in set(exclude))
 
 
 def _read_file(path, tree, members, max_events=-1, step_size="150 MB",
@@ -237,7 +356,9 @@ def _read_file(path, tree, members, max_events=-1, step_size="150 MB",
     across files is applied when the files are stitched, see ``_assemble``).
     """
     import uproot
+    import time
 
+    t0 = time.perf_counter()
     avail = _numeric_branches(path, tree)
     wants = [w for _, w in members]
     union = None if any(w is None for w in wants) else set().union(*wants)
@@ -259,9 +380,17 @@ def _read_file(path, tree, members, max_events=-1, step_size="150 MB",
     survivors = {smp.name: [] for smp, _ in members}
     read_total = 0
     for chunk in uproot.iterate(path + ":" + tree, expressions=read_list,
-                                library="np", step_size=step_size):
-        chunk = {k: v for k, v in _to_dict(chunk).items()
-                 if getattr(v, "ndim", 0) == 1 and v.dtype.kind in "biufc"}
+                                library="np", step_size=step_size,
+                                **_open_options(path)):
+        chunk = _to_dict(chunk)
+        # read_list holds flat scalars only (_numeric_branches), so there is
+        # nothing to filter here any more -- but never let a surprise through
+        odd = [k for k, v in chunk.items()
+               if getattr(v, "ndim", 0) != 1 or v.dtype.kind not in "biuf"]
+        if odd:
+            raise RuntimeError("%s: branch(es) %s did not read as flat numeric "
+                               "arrays although their interpretation is "
+                               "scalar" % (path, odd))
         if not chunk:
             continue
         read_total += len(next(iter(chunk.values())))
@@ -279,6 +408,12 @@ def _read_file(path, tree, members, max_events=-1, step_size="150 MB",
         del chunk
         if 0 < max_events <= read_total:
             break
+    dt = time.perf_counter() - t0
+    kept = ", ".join("%s %d" % (n, sum(len(next(iter(c.values()))) for c in ch))
+                     for n, ch in survivors.items())
+    print("  [read] %-34s %11d rows x %3d cols in %7.1f s  (%.2g rows/s; kept: %s)"
+          % (os.path.basename(path), read_total, len(read_list), dt,
+             read_total / dt if dt > 0 else 0.0, kept))
     return {name: (chunks, read_total) for name, chunks in survivors.items()}
 
 
@@ -353,7 +488,7 @@ def _fakerate_lookup(pt, edges, values):
     return fr
 
 
-def _apply_weight_factors(sample, arrays, base, n):
+def _apply_weight_factors(sample, arrays, base, n, build_syst=True):
     """Fold Sample.weight_factors into ``base``; build the variation weights.
 
     Returns ``(nominal, {nuisance: (w_up, w_down)})``. A variation weight is
@@ -361,6 +496,11 @@ def _apply_weight_factors(sample, arrays, base, n):
     multiplied in the SAME order as the nominal, so a variation that equals the
     nominal factor on some events reproduces the nominal weight bit for bit
     there (the datacard writer relies on this to skip no-effect templates).
+
+    ``build_syst=False`` skips the variations (returns ``{}``): they are
+    datacard-only, and each costs two full per-event float64 weight arrays
+    per process (x2 again while a split sample is fanned out). The variation
+    callables -- and their finiteness checks -- then do not run at all.
     """
     if not sample.weight_factors:
         return base, {}
@@ -368,7 +508,7 @@ def _apply_weight_factors(sample, arrays, base, n):
         raise ValueError("sample %r: weight_factors on a data sample"
                          % sample.name)
     missing = sorted({b for wf in sample.weight_factors.values()
-                      for b in wf.inputs if b not in arrays})
+                      for b in wf.needed(build_syst) if b not in arrays})
     if missing:
         raise KeyError("sample %r: weight_factors need branch(es) %s that are "
                        "not in the ntuple %s" % (sample.name, missing,
@@ -397,6 +537,8 @@ def _apply_weight_factors(sample, arrays, base, n):
 
     weight = _product()
     syst = {}
+    if not build_syst:
+        return weight, syst
     for k in names:
         for nuis, (fup, fdn) in sample.weight_factors[k].variations.items():
             if nuis in syst:
@@ -408,7 +550,8 @@ def _apply_weight_factors(sample, arrays, base, n):
     return weight, syst
 
 
-def _make_processes(sample: Sample, arrays: dict, fallback_color=None):
+def _make_processes(sample: Sample, arrays: dict, fallback_color=None,
+                    build_syst=True):
     """Turn (already selection-filtered) arrays into Process objects (weight/split)."""
     if not arrays:
         return []
@@ -429,7 +572,8 @@ def _make_processes(sample: Sample, arrays: dict, fallback_color=None):
         ptb, fr_edges, fr_vals = sample.fakerate
         weight = weight * _fakerate_lookup(arrays.get(ptb), fr_edges, fr_vals)
 
-    weight, syst = _apply_weight_factors(sample, arrays, weight, n)
+    weight, syst = _apply_weight_factors(sample, arrays, weight, n,
+                                         build_syst=build_syst)
 
     if not sample.split_by or sample.split_by not in arrays:
         return [Process(sample.name, sample.label, sample.color or fallback_color,
@@ -492,8 +636,9 @@ class Histogrammer:
 
     def __init__(self, samples, jobs=4, max_events=-1, max_range_events=300_000,
                  binning_overrides=None, needed_plot=None, step_size="150 MB",
-                 to_float32=True, derived=None):
+                 to_float32=True, derived=None, build_syst=True):
         self.samples = list(samples)
+        self.build_syst = build_syst            # False: no datacards -> skip
         self.jobs = jobs
         self.max_events = max_events
         self.max_range_events = max_range_events
@@ -523,7 +668,7 @@ class Histogrammer:
         from collections import OrderedDict
         by_file = OrderedDict()
         for s in self.samples:
-            want = _needed_columns(s, need, self.derived)
+            want = _needed_columns(s, need, self.derived, self.build_syst)
             files = _expand(s.files)
             dup = sorted({f for f in files if files.count(f) > 1})
             if dup:
@@ -549,7 +694,7 @@ class Histogrammer:
             # most one sample is ever held twice
             arrays = _assemble(s, per_sample.pop(s.name), self.max_events,
                                self.to_float32, self.derived)
-            procs += _make_processes(s, arrays)
+            procs += _make_processes(s, arrays, build_syst=self.build_syst)
             del arrays
         # colour any process still missing a colour (one colour per group/key)
         need, seen = [], set()
@@ -613,27 +758,33 @@ class Histogrammer:
 # ---------------------------------------------------------------------------
 class StackPlotter:
     def __init__(self, lumi=None, com=13.6, extra="Preliminary", normalize=False,
-                 overflow=False):
+                 overflow=False, formats=("png", "pdf")):
         self.lumi = lumi
         self.com = com
         self.extra = extra
         self.normalize = normalize
         self.overflow = overflow
+        bad = set(formats) - {"png", "pdf"}
+        if not formats or bad:
+            raise ValueError("formats must be a non-empty subset of png, pdf "
+                             "(got %s)" % (list(formats),))
+        self.formats = tuple(formats)
         style.set_cms_style()
 
     @staticmethod
     def _band(ax, edges, lo, hi, **kw):
-        ax.fill_between(edges, np.r_[lo, lo[-1]], np.r_[hi, hi[-1]],
-                        step="post", **kw)
+        return ax.fill_between(edges, np.r_[lo, lo[-1]], np.r_[hi, hi[-1]],
+                               step="post", **kw)
 
     def draw(self, branch, edges, processes, outdir, label, nbins=40):
+        """Draw ``branch``; True if written, False if no MC process has it."""
         import matplotlib.pyplot as plt
 
         present = [p for p in processes if branch in p.arrays]
         mc = [p for p in present if not p.is_data]
         data = [p for p in present if p.is_data]
         if not mc:
-            return
+            return False
 
         centers = 0.5 * (edges[:-1] + edges[1:])
         widths = np.diff(edges)
@@ -678,34 +829,42 @@ class StackPlotter:
                 2, 1, figsize=(8 * wscale, 8 * hscale), sharex=True,
                 gridspec_kw={"height_ratios": [3, 1], "hspace": 0.07})
         else:
-            fig, ax = plt.subplots(figsize=(8 * wscale, 7) * hscale)
+            fig, ax = plt.subplots(figsize=(8 * wscale, 7 * hscale))
             rax = None
 
         # --- stacked MC ---
+        # One StepPatch per process (ax.stairs), not one Rectangle per bin per
+        # process (ax.bar): the per-patch transform/draw overhead of ax.bar made
+        # rendering scale with n_bins x n_processes x n_saves (the 1000-bin
+        # stitched template was ~10x slower than a 40-bin plot). Same face and
+        # edge colour, same 0.4 edge width, same hatch on the signal.
         bottom = np.zeros_like(tot)
+        stack_handles = []
         for e in stack:
             y = e["sw"] * norm * dens
-            ax.bar(centers, y, width=widths, bottom=bottom, color=e["color"],
-#                    label=e["label"], align="center", linewidth=0.4,
-#                    edgecolor="black",
-                   label=e["label"], align="center", linewidth=0.4,
-                   edgecolor=e["color"],
-                   hatch="///" if e["is_signal"] else None)
-            bottom = bottom + y
+            top = bottom + y
+            h = ax.stairs(top, edges, baseline=bottom, fill=True,
+                      facecolor=e["color"], edgecolor=e["color"],
+                      linewidth=0.4, label=e["label"],
+                      hatch="///" if e["is_signal"] else None)
+            stack_handles.append(h)
+            bottom = top
 
         # --- MC stat band ---
         lo = (tot - tot_e) * norm * dens
         hi = (tot + tot_e) * norm * dens
-        self._band(ax, edges, lo, hi, facecolor="none", edgecolor="gray",
-                   hatch="xxxxx", linewidth=0.0, label="MC stat. unc.")
+        band_handle = self._band(ax, edges, lo, hi, facecolor="none",
+                                 edgecolor="gray", hatch="xxxxx",
+                                 linewidth=0.0, label="MC stat. unc.")
 
         # --- data ---
         if have_data:
             yd = data_sw * norm * dens
             yderr = np.sqrt(data_sw) * norm * dens
             m = data_sw > 0
-            ax.errorbar(centers[m], yd[m], yerr=yderr[m], fmt="o", color="black",
-                        markersize=4, label="Data", zorder=5)
+            data_handle = ax.errorbar(centers[m], yd[m], yerr=yderr[m], fmt="o",
+                                      color="black", markersize=4, label="Data",
+                                      zorder=5)
 
         if self.normalize:
             ax.set_ylabel("a.u.")
@@ -716,7 +875,11 @@ class StackPlotter:
             ax.set_ylabel("Events")
         ax.set_xlim(edges[0], edges[-1])
         ncol = 2 if len(stack) <= 8 else 3
-        leg = ax.legend(ncol=ncol, fontsize="x-small", loc="upper right")
+        # explicit handle order = the order the ax.bar version produced
+        # (collections, then containers): stat band, stack bottom->top, data
+        handles = [band_handle] + stack_handles + ([data_handle] if have_data else [])
+        leg = ax.legend(handles=handles, ncol=ncol, fontsize="x-small",
+                        loc="upper right")
         style.cms_label(ax, lumi=self.lumi, com=self.com,
                         data=have_data, extra=self.extra)
 
@@ -753,15 +916,18 @@ class StackPlotter:
         target = self._headroom_target(fig, ax, leg, nrows)
 
         ax.set_ylim(0.0, (ymax / target) if ymax > 0 else 1.0)
-        self._save(fig, ax, outdir, label, branch, logy=False)
+        self._save(fig, ax, outdir, label, branch, logy=False,
+                   formats=self.formats)
         # log version: keep the same fractional clearance below the legend
         ax.set_yscale("log")
         bot = (0.3 * norm) if self.normalize else 0.3
         peak = ymax if ymax > 0 else 1.0
         top = (bot * (peak / bot) ** (1.0 / target)) if peak > bot else bot * 50
         ax.set_ylim(bot, top)
-        self._save(fig, ax, outdir, label, branch, logy=True)
+        self._save(fig, ax, outdir, label, branch, logy=True,
+                   formats=self.formats)
         plt.close(fig)
+        return True
 
     @staticmethod
     def _headroom_target(fig, ax, leg, nrows):
@@ -787,9 +953,9 @@ class StackPlotter:
         return min(0.92, max(0.45, frac - 0.06))
 
     @staticmethod
-    def _save(fig, ax, outdir, label, branch, logy):
+    def _save(fig, ax, outdir, label, branch, logy, formats=("png", "pdf")):
         sub = "log" if logy else "lin"
-        for ext in ("png", "pdf"):
+        for ext in formats:
             d = os.path.join(outdir, label, ext, sub)
             os.makedirs(d, exist_ok=True)
             fig.savefig(os.path.join(d, "%s.%s" % (branch, ext)),
@@ -814,11 +980,22 @@ def _draw_one(task):
     branch, edges, outdir, label, nbins = task
     procs = _PLOT_STATE["procs"]
     plotter = _PLOT_STATE["plotter"]
+    return (branch, _draw_status(plotter, branch, edges, procs, outdir,
+                                 label, nbins))
+
+
+def _draw_status(plotter, branch, edges, procs, outdir, label, nbins):
+    """Draw one branch and classify the outcome for plot_status.json:
+    "ok" (4 files written), "no_mc" (no MC process carries the branch -- the
+    plotter never drew these) or "error: <msg>" (never let one bad branch kill
+    the run, but never lose it either: the Slurm merge fails on these)."""
     try:
-        plotter.draw(branch, edges, procs, outdir, label, nbins=nbins)
-        return (branch, None)
-    except Exception as e:                 # never let one bad branch kill the run
-        return (branch, "%s" % e)
+        drew = plotter.draw(branch, edges, procs, outdir, label, nbins=nbins)
+        return "ok" if drew else "no_mc"
+    except Exception as e:
+        import matplotlib.pyplot as plt
+        plt.close("all")                   # the failed figure is still open
+        return "error: %s: %s" % (type(e).__name__, e)
 
 
 # ---------------------------------------------------------------------------
@@ -830,8 +1007,16 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
         binning_overrides=None, max_events=-1, step_size="150 MB",
         to_float32=True, verbose=True,
         datacard_branches=None, datacard_signal="Bc", datacard_def=None,
-        axis_titles=None, derived=None):
+        axis_titles=None, derived=None, plot=True, formats=("png", "pdf")):
     """Load samples and produce one stacked plot per branch.
+
+    ``plot=False`` (``plot.py --datacards-only``) reads only the datacard
+    branches, writes the datacards (a failure is then FATAL instead of being
+    reported and skipped, since the datacards are the only product), yields and
+    selection, and draws nothing. ``formats`` picks png and/or pdf (PNGs
+    can be rendered from the PDFs later, see pdf2png.py). Every run writes
+    ``plot_status.json``
+    ({branch: "ok" | "no_mc" | "error: ..."}), which the Slurm merge checks.
 
     ``derived`` is an optional ``{name: Derived(func, inputs)}`` mapping of new
     columns to compute from existing branches (see cmsplot.derived). Derived
@@ -852,11 +1037,20 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
     needed_plot = set(branches) if branches else None
     if needed_plot is not None and datacard_branches:
         needed_plot |= set(datacard_branches)
+    if not plot:
+        if not datacard_branches:
+            raise ValueError("plot=False (--datacards-only) needs datacard "
+                             "branches: there would be nothing to produce")
+        if branches:
+            raise ValueError("plot=False (--datacards-only) with a branch list:"
+                             " the branches would be read and never plotted")
+        needed_plot = set(datacard_branches)
 
     hg = Histogrammer(samples, jobs=jobs, max_events=max_events,
                       binning_overrides=binning_overrides,
                       needed_plot=needed_plot, step_size=step_size,
-                      to_float32=to_float32, derived=derived)
+                      to_float32=to_float32, derived=derived,
+                      build_syst=bool(datacard_branches))
     if verbose:
         print("[cmsplot] reading %d samples (%s) ..."
               % (len(list(samples)),
@@ -876,6 +1070,8 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
                                 signal=datacard_signal, overflow=overflow,
                                 verbose=verbose, datacard_def=datacard_def)
         except Exception as e:
+            if not plot:
+                raise
             print("  ! datacard generation failed: %s" % e)
 
     # fix the total MC normalisation to the data yield (keeps the Bc:Hb ratio,
@@ -907,18 +1103,22 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
             print("  %-22s %10d events  w.sum=%.3g"
                   % (p.label, p.weight.size, float(np.sum(p.weight))))
 
-    todo = branches if branches else hg.branches()
-    todo = [b for b in todo if b not in set(exclude)]
+    if not plot:
+        todo = []
+    else:
+        todo = branches if branches else hg.branches()
+        todo = [b for b in todo if b not in set(exclude)]
     if verbose:
         print("[cmsplot] plotting %d branches -> %s/%s"
               % (len(todo), outdir, label))
 
     plotter = StackPlotter(lumi=lumi, com=com, extra=extra, normalize=normalize,
-                           overflow=overflow)
+                           overflow=overflow, formats=formats)
 
     # Bin edges depend on the loaded arrays (held in the parent), so compute them
     # here once; workers then only need (branch, edges).
     edges_map = {b: hg.edges_for(b, nbins=nbins) for b in todo}
+    status = {}
 
     if jobs > 1 and len(todo) > 1 and "fork" in _mp.get_all_start_methods():
         # fork pool: workers inherit `procs`/`plotter` copy-on-write (no array
@@ -929,28 +1129,40 @@ def run(samples, outdir="plots", label=None, branches=None, exclude=(),
         try:
             ctx = _mp.get_context("fork")
             with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as ex:
-                for i, (b, err) in enumerate(ex.map(_draw_one, tasks), 1):
-                    if err:
-                        print("  ! skipping %s (%s)" % (b, err))
+                for i, (b, st) in enumerate(ex.map(_draw_one, tasks), 1):
+                    status[b] = st
+                    if st.startswith("error"):
+                        print("  ! skipping %s (%s)" % (b, st))
                     if verbose and i % 20 == 0:
                         print("    ... %d/%d" % (i, len(todo)))
         finally:
             _PLOT_STATE.clear()
     else:
         for i, b in enumerate(todo, 1):
-            try:
-                plotter.draw(b, edges_map[b], procs, outdir, label, nbins=nbins)
-            except Exception as e:  # never let one bad branch kill the run
-                print("  ! skipping %s (%s)" % (b, e))
+            status[b] = _draw_status(plotter, b, edges_map[b], procs, outdir,
+                                     label, nbins)
+            if status[b].startswith("error"):
+                print("  ! skipping %s (%s)" % (b, status[b]))
             if verbose and i % 20 == 0:
                 print("    ... %d/%d" % (i, len(todo)))
 
     _write_yields(procs, outdir, label)
     _write_selection(samples, outdir, label,
                      scale_to_data=scale_to_data, overflow=overflow)
+    _write_status(status, outdir, label)
     if verbose:
-        print("[cmsplot] done.")
+        n = {k: sum(1 for v in status.values() if v.split(":")[0] == k)
+             for k in ("ok", "no_mc", "error")}
+        print("[cmsplot] done: %d plotted, %d without MC, %d failed."
+              % (n["ok"], n["no_mc"], n["error"]))
     return os.path.join(outdir, label)
+
+
+def _write_status(status, outdir, label):
+    import json
+    os.makedirs(os.path.join(outdir, label), exist_ok=True)
+    with open(os.path.join(outdir, label, "plot_status.json"), "w") as f:
+        json.dump(status, f, indent=1, sort_keys=True)
 
 
 def _write_yields(procs, outdir, label):

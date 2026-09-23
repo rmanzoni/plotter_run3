@@ -551,6 +551,8 @@ BC_WEIGHT_FACTORS = OrderedDict([
     ("hammer_ff", WeightFactor(
         inputs=("hammer_weight", "hammer_status", "gen_bc_decay")
                + _HAMMER_VAR_BRANCHES,
+        # plot-only runs read just these (no datacard -> no variations)
+        nominal_inputs=("hammer_weight", "hammer_status", "gen_bc_decay"),
         nominal=_hammer_factor("hammer_weight", report=True),
         variations=OrderedDict(
             ("ff_ev%02d" % j, (_hammer_factor("hammer_ff_ev%02d_up" % j),
@@ -560,6 +562,7 @@ BC_WEIGHT_FACTORS = OrderedDict([
     ("bc_ctau", WeightFactor(
         inputs=("gen_bc_ctau_weight", "gen_bc_ctau_weight_up",
                 "gen_bc_ctau_weight_down"),
+        nominal_inputs=("gen_bc_ctau_weight",),
         nominal=_ctau_factor("gen_bc_ctau_weight"),
         variations={"bc_ctau": (_ctau_factor("gen_bc_ctau_weight_up"),
                                 _ctau_factor("gen_bc_ctau_weight_down"))},

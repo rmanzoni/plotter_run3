@@ -83,3 +83,39 @@ dropped. Override `--bins`, or pass `--branches` to restrict, `--exclude` to ski
 - Reading is threaded across samples (`--jobs`); uproot releases the GIL while
   decompressing, so this scales without pickling overhead.
 - Branches present only in MC (gen-level) are drawn MC-only (no data/ratio).
+
+## Output formats and run status
+`--formats pdf` (or `png`) saves only those; `python3 pdf2png.py plots/<label>`
+renders the PNGs from the PDFs afterwards (pdftoppm, else gs; 150 dpi like the
+native PNGs, same size ±1–2 px, different rasteriser). Every run writes
+`plot_status.json`: `ok`, `no_mc` (no MC process has the branch) or
+`error: ...` per branch. Numeric branches that are not flat scalars (vectors,
+fixed-size arrays) are never read and are listed once per file. A
+`WeightFactor(nominal_inputs=...)` limits what is read when no datacard is
+requested (variations are then not evaluated). Each file read prints a
+`[read]` line: rows, columns, seconds.
+
+## Slurm (PSI T3)
+/pnfs is mounted on the UIs only, so jobs read inputs through
+`root://t3dcachedb03.psi.ch:1094//pnfs/...` (as the Bmmm ntuplizer submitters
+do), work in `/scratch/$USER`, and publish to the output dir, which must be on
+a shared FS (e.g. /work). From the UI, in the environment the jobs should use
+(it is recreated on the WN; it needs `XRootD` python bindings):
+```bash
+voms-proxy-init -voms cms -valid 48:00 -out ~/.x509up   # not /tmp: the WNs must see it
+export X509_USER_PROXY=~/.x509up
+python3 submit_slurm.py --dry-run --png-from-pdf -- \
+    --config samples_rjpsi.py --outdir /work/$USER/plots --label test_v1 \
+    --datacard-branches q2_coll
+python3 submit_slurm.py --png-from-pdf -- \
+    --config samples_rjpsi.py --outdir /work/$USER/plots --label all_v1 \
+    --datacard-branches q2_coll
+```
+Everything after `--` is a `plot.py` option. The branch list is taken from the
+ntuple schemas on the UI and cut into `--branches-per-job` chunks (default
+10); task 0 writes the datacards. The merge job starts after every array task
+has ended (`--dependency=afterany`), merges only if all tasks left a `DONE`
+marker and agree on `yields.txt`/`selection.txt`, and otherwise lists what is
+missing; then `python3 submit_slurm.py --resubmit /work/$USER/plots/all_v1`.
+Logs: `<outdir>/<label>/_slurm/logs/`. Defaults: `short`, 60 min, 4 cpus,
+6000 MB, account `t3`, `--nodelist t3wn[80-91]` (see `--help`).
